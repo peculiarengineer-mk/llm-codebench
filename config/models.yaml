@@ -40,8 +40,15 @@ models:
   - id: openai/gpt-5.5
     price_override: null
 
-  # OpenAI — GPT-5.6
-  - id: openai/gpt-5.6
+  # OpenAI — GPT-5.6 tiers (no bare "gpt-5.6" id exists on OpenRouter; the series
+  # ships as Luna/Terra/Sol. The -pro of each is the same model on a different
+  # serving tier, so the plain ids are used here for a within-5.6 cost/quality
+  # frontier). Prices are input / output USD per 1M tokens.
+  - id: openai/gpt-5.6-luna   # $1 / $6 — fast, cost-efficient
+    price_override: null
+  - id: openai/gpt-5.6-terra  # $2.50 / $15 — balanced
+    price_override: null
+  - id: openai/gpt-5.6-sol    # $5 / $30 — flagship (reasoning/coding)
     price_override: null
 
   # Google — Gemini 3.1 Pro  ($2 / $12 per M)
