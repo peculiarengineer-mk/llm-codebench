@@ -230,7 +230,9 @@ def _difficulty_rows(run: RunResult) -> tuple[list[str], list[dict]]:
         agg[(pr.model, diff)].append(pr.pass_at_k)
 
     difficulties = sorted(present, key=lambda d: _DIFF_ORDER.get(d, 99))
-    models = sorted({pr.model for pr in run.results})
+    # Only models with at least one scored problem (consistent with the
+    # per-language table, which also drops never-sampled models).
+    models = sorted({model for (model, _diff) in agg})
     rows: list[dict] = []
     for model in models:
         row: dict = {"model": model}
