@@ -90,36 +90,65 @@ def _wilson(c: int, n: int, z: float = _Z95) -> tuple[float, float]:
 # --------------------------------------------------------------------------- #
 
 
+def _untested(pr: ProblemResult) -> bool:
+    """True if no attempt for this (model, problem) ever reached the model.
+
+    Every attempt failed at the API layer (e.g. HTTP 402) or none were made, so
+    the pair was never sampled. Such problems are excluded from a model's
+    pass@k / solved / CI denominators — scoring them as 0 would penalize a model
+    for a billing/infra failure it isn't responsible for.
+    """
+    return not any(a.error is None for a in pr.attempts)
+
+
 def _model_rows(run: RunResult) -> list[dict]:
-    """Aggregate per-model leaderboard rows (correctness / speed / cost)."""
+    """Aggregate per-model leaderboard rows (correctness / speed / cost).
+
+    Correctness metrics are computed only over *scored* problems (those with at
+    least one attempt that actually reached the model); fully-errored problems
+    are surfaced as an ``untested`` count instead of counted as failures.
+    """
     by_model: dict[str, list[ProblemResult]] = defaultdict(list)
     for pr in run.results:
         by_model[pr.model].append(pr)
 
     rows: list[dict] = []
     for model, results in by_model.items():
-        n = len(results) or 1
-        pass1 = sum(r.pass_at_1 for r in results) / n
-        passk = sum(r.pass_at_k for r in results) / n
+        scored_results = [r for r in results if not _untested(r)]
+        scored = len(scored_results)
+        untested = len(results) - scored
 
-        latencies = [a.latency_ms for r in results for a in r.attempts]
-        ttfts = [a.ttft_ms for r in results for a in r.attempts if a.ttft_ms is not None]
-        completion_tokens = sum(a.completion_tokens for r in results for a in r.attempts)
-        prompt_tokens = sum(a.prompt_tokens for r in results for a in r.attempts)
+        ns = scored or 1  # avoid div-by-zero; a fully-untested model averages 0
+        pass1 = sum(r.pass_at_1 for r in scored_results) / ns
+        passk = sum(r.pass_at_k for r in scored_results) / ns
+
+        # Speed/token metrics count only attempts that reached the model; errored
+        # attempts carry latency 0 / tokens 0 and would skew the averages.
+        good = [a for r in results for a in r.attempts if a.error is None]
+        latencies = [a.latency_ms for a in good]
+        ttfts = [a.ttft_ms for a in good if a.ttft_ms is not None]
+        completion_tokens = sum(a.completion_tokens for a in good)
+        prompt_tokens = sum(a.prompt_tokens for a in good)
         total_latency_s = sum(latencies) / 1000.0 if latencies else 0.0
         tokens_per_sec = (completion_tokens / total_latency_s) if total_latency_s else 0.0
-        cost = sum(a.cost_usd for r in results for a in r.attempts)
+        cost = sum(a.cost_usd for r in results for a in r.attempts)  # errored = 0
         retries = sum(a.retries for r in results for a in r.attempts)
 
         # $/correct-solution: total cost divided by number of problems solved
         # (pass@k counts a problem as solved if any of its k attempts passed).
-        solved = sum(1 for r in results if r.pass_at_k > 0)
-        total = len(results)
+        solved = sum(1 for r in scored_results if r.pass_at_k > 0)
         cost_per_correct = (cost / solved) if solved else float("inf")
-        ci_low, ci_high = _wilson(solved, total)
+        ci_low, ci_high = _wilson(solved, scored)  # _wilson(0, 0) -> (0, 0)
 
-        # Per-attempt failure-mode tally + whether pricing came from a config
-        # override (so the row can be asterisked as not-live-priced).
+        # Low confidence: a scored problem sampled fewer than k times (some
+        # attempts errored), so k-clamping reports pass@<k> as pass@k.
+        low_conf = any(
+            sum(1 for a in r.attempts if a.error is None) < run.k
+            for r in scored_results
+        )
+
+        # Per-attempt failure-mode tally (over ALL attempts, so the api-error
+        # bucket stays visible) + whether pricing came from a config override.
         fails = dict.fromkeys(FAILURE_ORDER, 0)
         config_priced = False
         for r in results:
@@ -132,12 +161,15 @@ def _model_rows(run: RunResult) -> list[dict]:
         rows.append(
             {
                 "model": model,
-                "problems": total,
+                "problems": len(results),
+                "scored": scored,
+                "untested": untested,
                 "pass_at_1": pass1,
                 "pass_at_k": passk,
                 "ci_low": ci_low,
                 "ci_high": ci_high,
                 "solved": solved,
+                "low_conf": low_conf,
                 "avg_latency_ms": (sum(latencies) / len(latencies)) if latencies else 0.0,
                 "avg_ttft_ms": (sum(ttfts) / len(ttfts)) if ttfts else None,
                 "tokens_per_sec": tokens_per_sec,
@@ -151,15 +183,18 @@ def _model_rows(run: RunResult) -> list[dict]:
                 "config_priced": config_priced,
             }
         )
-    # Rank by pass@k desc, then cost asc.
-    rows.sort(key=lambda r: (-r["pass_at_k"], r["cost_usd"]))
+    # Rank: models with at least one scored problem first (a never-sampled model
+    # must not top the board), then pass@k desc, then cost asc.
+    rows.sort(key=lambda r: (0 if r["scored"] else 1, -r["pass_at_k"], r["cost_usd"]))
     return rows
 
 
 def _language_rows(run: RunResult) -> list[dict]:
-    """Per (model, language) pass@k breakdown."""
+    """Per (model, language) pass@k breakdown (untested problems excluded)."""
     agg: dict[tuple[str, str], list[float]] = defaultdict(list)
     for pr in run.results:
+        if _untested(pr):
+            continue
         agg[(pr.model, pr.language.value)].append(pr.pass_at_k)
     rows = [
         {
@@ -188,6 +223,8 @@ def _difficulty_rows(run: RunResult) -> tuple[list[str], list[dict]]:
     agg: dict[tuple[str, str], list[float]] = defaultdict(list)
     present: set[str] = set()
     for pr in run.results:
+        if _untested(pr):
+            continue  # never-sampled problems don't score for/against a model
         diff = pr.difficulty or "?"
         present.add(diff)
         agg[(pr.model, diff)].append(pr.pass_at_k)
@@ -258,15 +295,22 @@ def _fmt_pct(value: float) -> str:
     return f"{value * 100:.0f}%"
 
 
-def _headline(rows: list[dict]) -> str:
+def _headline(run: RunResult, rows: list[dict]) -> str:
     """A one-sentence auto TL;DR for the top of the report."""
     if not rows:
         return "No results."
-    best = rows[0]
-    priced = [r for r in rows if r["cost_per_correct"] != float("inf")]
+    if run.aborted_reason:
+        return f"Run did not complete — {run.aborted_reason}"
+    # Only models that were actually sampled can lead; a never-ran model must not
+    # be crowned just because it sorted to the top at 0% and $0.
+    ranked = [r for r in rows if r["scored"] > 0]
+    if not ranked or ranked[0]["pass_at_k"] == 0:
+        return "No model solved any problem in this run."
+    best = ranked[0]
+    priced = [r for r in ranked if r["cost_per_correct"] != float("inf")]
     parts = [
         f"{best['model']} leads at {_fmt_pct(best['pass_at_k'])} pass@k "
-        f"({best['solved']}/{best['problems']} solved)"
+        f"({best['solved']}/{best['scored']} solved)"
     ]
     if priced:
         cheapest = min(priced, key=lambda r: r["cost_per_correct"])
@@ -370,7 +414,7 @@ def render_cli(run: RunResult, console=None) -> None:
     rows = _model_rows(run)
 
     console.print(f"[dim]{_methodology_line(run)}[/dim]")
-    console.print(f"[bold]TL;DR[/bold] {_headline(rows)}\n")
+    console.print(f"[bold]TL;DR[/bold] {_headline(run, rows)}\n")
 
     title = (
         f"llm-codebench — {run.problems_count} problems × {len(run.models)} models "
@@ -391,12 +435,20 @@ def render_cli(run: RunResult, console=None) -> None:
     for row in rows:
         ttft = f"{row['avg_ttft_ms']:.0f}ms" if row["avg_ttft_ms"] is not None else "—"
         star = "*" if row["config_priced"] else ""
+        # A fully-untested model has no scored problems: show "—" not a fake 0%.
+        if row["scored"] == 0:
+            pass1_s = passk_s = solved_s = ci_s = "—"
+        else:
+            pass1_s = _fmt_pct(row["pass_at_1"])
+            passk_s = _fmt_pct(row["pass_at_k"]) + ("†" if row["low_conf"] else "")
+            solved_s = f"{row['solved']}/{row['scored']}"
+            ci_s = f"{_fmt_pct(row['ci_low'])}–{_fmt_pct(row['ci_high'])}"
         table.add_row(
             row["model"],
-            _fmt_pct(row["pass_at_1"]),
-            _fmt_pct(row["pass_at_k"]),
-            f"{row['solved']}/{row['problems']}",
-            f"{_fmt_pct(row['ci_low'])}–{_fmt_pct(row['ci_high'])}",
+            pass1_s,
+            passk_s,
+            solved_s,
+            ci_s,
             f"{row['tokens_per_sec']:.0f}",
             ttft,
             f"${row['cost_usd']:.4f}{star}",
@@ -404,6 +456,17 @@ def render_cli(run: RunResult, console=None) -> None:
             str(row["retries"]),
         )
     console.print(table)
+    if run.aborted_reason:
+        console.print(f"[red]⚠ {run.aborted_reason}[/red]")
+    if any(r["untested"] for r in rows):
+        notes = ", ".join(
+            f"{r['model']} ({r['untested']})" for r in rows if r["untested"]
+        )
+        console.print("[yellow]⚠ untested problems excluded from scoring "
+                      f"(all attempts API-errored): {notes}[/yellow]")
+    if any(r["low_conf"] for r in rows):
+        console.print("[dim]† some problems were sampled fewer than k times "
+                      "(API errors); their pass@k is lower-confidence.[/dim]")
     if any(r["config_priced"] for r in rows):
         console.print("[dim]* cost priced from a config override, not live API "
                       "pricing.[/dim]")
@@ -498,6 +561,8 @@ _HTML_TEMPLATE = Template(
   .meta { color: var(--muted); font-size: .9rem; }
   .tldr { background:#2a81; border-left:3px solid var(--good); padding:.6rem .9rem;
           border-radius:4px; margin:1rem 0; }
+  .warn { background:#e0a80022; border-left:3px solid var(--warn); padding:.6rem .9rem;
+          border-radius:4px; margin:1rem 0; }
   .scatter { overflow-x:auto; }
   details { border:1px solid var(--line); border-radius:6px; padding:.4rem .8rem;
             margin:.5rem 0; }
@@ -517,6 +582,11 @@ _HTML_TEMPLATE = Template(
   <p class="meta">{{ run.problems_count }} problems &times; {{ run.models|length }}
      models &middot; {{ methodology }}</p>
   <div class="tldr"><strong>TL;DR</strong> — {{ headline }}</div>
+  {% if run.aborted_reason %}<div class="warn"><strong>⚠ Run did not complete</strong> —
+     {{ run.aborted_reason }} Rows below cover only what ran; untested problems are
+     excluded from scoring.</div>{% endif %}
+  {% if untested_note %}<div class="warn"><strong>⚠ Untested problems excluded</strong> —
+     all attempts API-errored (never sampled) for: {{ untested_note }}.</div>{% endif %}
   <p class="meta">total cost
      <strong>${{ '%.4f'|format(run.total_cost_usd) }}</strong> &middot;
      wall time {{ '%.1f'|format((run.wall_time_ms if run.wall_time_ms is not none else run.total_latency_ms) / 1000) }}s &middot;
@@ -532,16 +602,22 @@ _HTML_TEMPLATE = Template(
     {% for r in rows %}
       <tr>
         <td>{{ r.model }}</td>
+        {% if r.scored == 0 %}
+        <td data-sort="-1">&mdash;</td>
+        <td data-sort="-1">&mdash; <span class="ci">(untested)</span></td>
+        <td data-sort="-1">&mdash;</td>
+        {% else %}
         <td class="bar" data-sort="{{ r.pass_at_1 }}">
           <span style="width: {{ (r.pass_at_1 * 70)|round(1) }}px"></span>
           {{ '%.0f'|format(r.pass_at_1 * 100) }}%
         </td>
         <td class="bar" data-sort="{{ r.pass_at_k }}">
           <span style="width: {{ (r.pass_at_k * 70)|round(1) }}px"></span>
-          <strong>{{ '%.0f'|format(r.pass_at_k * 100) }}%</strong>
+          <strong>{{ '%.0f'|format(r.pass_at_k * 100) }}%</strong>{% if r.low_conf %}&dagger;{% endif %}
           <span class="ci">({{ '%.0f'|format(r.ci_low * 100) }}&ndash;{{ '%.0f'|format(r.ci_high * 100) }})</span>
         </td>
-        <td data-sort="{{ r.solved }}">{{ r.solved }}/{{ r.problems }}</td>
+        <td data-sort="{{ r.solved }}">{{ r.solved }}/{{ r.scored }}</td>
+        {% endif %}
         <td data-sort="{{ r.tokens_per_sec }}">{{ '%.0f'|format(r.tokens_per_sec) }}</td>
         <td data-sort="{{ r.avg_ttft_ms or -1 }}">{% if r.avg_ttft_ms is not none %}{{ '%.0f'|format(r.avg_ttft_ms) }}ms{% else %}&mdash;{% endif %}</td>
         <td data-sort="{{ r.cost_usd }}">${{ '%.4f'|format(r.cost_usd) }}{% if r.config_priced %}*{% endif %}</td>
@@ -653,6 +729,9 @@ def render_html(run: RunResult, out_path: str | Path) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     rows = _model_rows(run)
     difficulties, diff_rows = _difficulty_rows(run)
+    untested_note = ", ".join(
+        f"{r['model']} ({r['untested']})" for r in rows if r["untested"]
+    )
     html = _HTML_TEMPLATE.render(
         run=run,
         rows=rows,
@@ -662,7 +741,8 @@ def render_html(run: RunResult, out_path: str | Path) -> Path:
         problem_rows=_problem_rows(run),
         cost_per_correct=_fmt_cost_per_correct,
         methodology=_methodology_line(run),
-        headline=_headline(rows),
+        headline=_headline(run, rows),
+        untested_note=untested_note,
         scatter=Markup(_scatter_svg(rows)),
         failure_order=FAILURE_ORDER,
         failure_labels=FAILURE_LABELS,

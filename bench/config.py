@@ -134,18 +134,26 @@ def expand_targets(
     distinct leaderboard rows.
     """
     targets: list[RunTarget] = []
+    seen: set[str] = set()
     for spec in specs:
         levels: list[str | None]
-        if efforts_override is not None:
+        # A non-empty override wins for every model; an empty list (or None) means
+        # "no override" so per-spec efforts apply — an empty override must not
+        # silently produce zero targets (an empty run).
+        if efforts_override:
             levels = list(efforts_override)
         elif spec.efforts:
             levels = list(spec.efforts)
         else:
             levels = [None]
         for effort in levels:
+            label = target_label(spec.id, effort)
+            if label in seen:
+                continue  # dedup: same (id, effort) requested twice
+            seen.add(label)
             targets.append(
                 RunTarget(
-                    label=target_label(spec.id, effort),
+                    label=label,
                     model=spec.id,
                     effort=effort,  # type: ignore[arg-type]
                     price_override=spec.price_override,

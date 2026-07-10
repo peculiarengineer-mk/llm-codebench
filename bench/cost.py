@@ -134,6 +134,9 @@ class SpendGuard:
 
         Idempotent — the first reason wins, so the message reflects the failure
         that actually stopped the run. ``can_proceed`` returns False thereafter.
+
+        No lock is taken: asyncio is single-threaded and this method never awaits,
+        so the check-then-set runs atomically with respect to other coroutines.
         """
         if self.abort_reason is None:
             self.abort_reason = reason
