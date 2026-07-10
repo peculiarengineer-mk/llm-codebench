@@ -279,7 +279,7 @@ class RunResult(_Frozen):
 
     results: list[ProblemResult]
     total_cost_usd: float
-    total_latency_ms: float
+    total_latency_ms: float  # cumulative per-attempt latency (compute time)
     models: list[str]
     problems_count: int
     k: int
@@ -291,13 +291,15 @@ class RunResult(_Frozen):
     prompt_style: str | None = None
     generated_at: str | None = None  # ISO-8601 UTC timestamp of the run
     aborted_reason: str | None = None  # set when a fatal API error halted the run
+    wall_time_ms: float | None = None  # real elapsed wall-clock time for the run
 
 
 class ModelSpec(_Frozen):
     """One entry from config/models.yaml.
 
-    ``price_override`` is USD per token; when set, attempts against this model
-    record ``price_source="config"`` instead of ``"api"``. ``efforts`` is an
+    ``price_override`` is a flat USD-per-token rate applied to BOTH prompt and
+    completion tokens (a single blended figure); when set, attempts against this
+    model record ``price_source="config"`` instead of ``"api"``. ``efforts`` is an
     optional fan-out list of reasoning-effort levels: one entry with
     ``efforts: [low, medium, high]`` expands into three benchmark targets sharing
     the same model id. Absent/empty ``efforts`` means a single effort-less target.

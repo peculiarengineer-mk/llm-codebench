@@ -8,6 +8,7 @@ aggregates latency/tokens/cost — all under the :class:`SpendGuard` cap.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from math import comb
 
@@ -208,9 +209,14 @@ async def run_benchmark(
         for target in targets
         for problem in problems
     ]
+    wall_start = time.perf_counter()
     results: list[ProblemResult] = await asyncio.gather(*tasks)
+    wall_time_ms = (time.perf_counter() - wall_start) * 1000.0
 
     total_cost = sum(a.cost_usd for r in results for a in r.attempts)
+    # Cumulative per-attempt latency (compute time). NOT wall-clock: attempts run
+    # concurrently, so this sums overlapping requests — wall_time_ms is the real
+    # elapsed duration of the run.
     total_latency = sum(a.latency_ms for r in results for a in r.attempts)
     total_retries = sum(a.retries for r in results for a in r.attempts)
 
@@ -227,6 +233,7 @@ async def run_benchmark(
         prompt_style=config.prompt_style,
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         aborted_reason=guard.abort_reason,
+        wall_time_ms=wall_time_ms,
     )
 
 

@@ -457,9 +457,11 @@ def render_cli(run: RunResult, console=None) -> None:
             )
         console.print(lt)
 
+    wall_s = (run.wall_time_ms if run.wall_time_ms is not None else run.total_latency_ms) / 1000.0
     console.print(
         f"\nTotal cost: [bold]${run.total_cost_usd:.4f}[/bold]   "
-        f"Total wall time: {run.total_latency_ms / 1000:.1f}s   "
+        f"Wall time: {wall_s:.1f}s   "
+        f"Compute: {run.total_latency_ms / 1000:.1f}s   "
         f"Total retries: [bold]{run.total_retries}[/bold]"
     )
 
@@ -517,7 +519,7 @@ _HTML_TEMPLATE = Template(
   <div class="tldr"><strong>TL;DR</strong> — {{ headline }}</div>
   <p class="meta">total cost
      <strong>${{ '%.4f'|format(run.total_cost_usd) }}</strong> &middot;
-     wall time {{ '%.1f'|format(run.total_latency_ms / 1000) }}s &middot;
+     wall time {{ '%.1f'|format((run.wall_time_ms if run.wall_time_ms is not none else run.total_latency_ms) / 1000) }}s &middot;
      total retries <strong>{{ run.total_retries }}</strong></p>
 
   <h2>Leaderboard</h2>

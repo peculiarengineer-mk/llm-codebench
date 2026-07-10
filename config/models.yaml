@@ -1,14 +1,17 @@
 # Model roster for llm-codebench.
 #
 # Each entry is an OpenRouter model id. Pricing is normally fetched live from
-# OpenRouter's /api/v1/models endpoint (per-token USD). Set `price_override`
-# (USD per output token) only if you need to pin a price for costing/dry-run;
-# when set, the Attempt's price_source is recorded as "config" instead of "api".
+# OpenRouter's /api/v1/models endpoint (separate per-token USD rates for input
+# and output). Set `price_override` only if you need to pin a price for
+# costing/dry-run: it is a FLAT USD-per-token rate applied to BOTH prompt and
+# completion tokens (a single blended figure, since one number can't express the
+# input/output split). When set, the Attempt's price_source is recorded as
+# "config" instead of "api".
 #
 # Format:
 #   models:
 #     - id: <openrouter/model-id>
-#       price_override: <float | null>   # optional; USD per token
+#       price_override: <float | null>   # optional; flat USD/token, both sides
 #       efforts: [low, medium, high]     # optional; reasoning-effort fan-out
 #
 # `efforts` sweeps one model across reasoning levels: the entry expands into one
@@ -35,6 +38,10 @@ models:
 
   # OpenAI — GPT-5.5  ($5 / $30 per M)
   - id: openai/gpt-5.5
+    price_override: null
+
+  # OpenAI — GPT-5.6
+  - id: openai/gpt-5.6
     price_override: null
 
   # Google — Gemini 3.1 Pro  ($2 / $12 per M)
