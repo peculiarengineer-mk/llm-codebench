@@ -76,7 +76,16 @@ llm-codebench --langs python,typescript --k 3 --max-spend 2.00 --out results/
 ```
 
 Common flags: `--models`, `--efforts`, `--langs`, `--k`, `--temp`, `--timeout`,
-`--max-spend`, `--dry-run`, `--prompt-style {strict,loose}`, `--out`.
+`--max-spend`, `--max-tokens`, `--dry-run`, `--prompt-style {strict,loose}`,
+`--out`.
+
+> **`HTTP 402 … requires more credits`?** OpenRouter reserves credits up front
+> for a request's *maximum* possible completion — which for some models is their
+> full 64k context — so a low-balance key can be rejected before generating a
+> single token. Pass `--max-tokens` (e.g. `--max-tokens 8000`) to cap that
+> reservation, or top up the key. A single model failing this way no longer
+> aborts the run: it's recorded as a failed attempt (with the error in the
+> per-problem drill-down) and every other model still completes.
 
 ### Reasoning-effort variants
 

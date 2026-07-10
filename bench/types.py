@@ -217,6 +217,7 @@ class RunConfig(_Frozen):
     max_spend_usd: float
     dry_run: bool
     prompt_style: Literal["strict", "loose"]
+    max_tokens: int | None = None  # per-request completion cap; None = model default
     targets: list[RunTarget] = Field(default_factory=list)
 
 

@@ -13,7 +13,7 @@ from math import comb
 
 from bench.cost import CostEstimate, SpendGuard, estimate_run
 from bench.extract import extract_code
-from bench.openrouter import ModelPricing, OpenRouterClient
+from bench.openrouter import ModelPricing, OpenRouterClient, OpenRouterError
 from bench.problems import render_prompt
 from bench.sandbox import run_in_sandbox
 from bench.types import (
@@ -69,9 +69,38 @@ async def _run_one_attempt(
 ) -> tuple[Attempt, ExecResult]:
     """One generation + sandbox execution for a (target, problem)."""
     prompt = render_prompt(problem, config.prompt_style)
-    attempt = await client.complete(
-        target.model, prompt, config.temperature, effort=target.effort
-    )
+    try:
+        attempt = await client.complete(
+            target.model,
+            prompt,
+            config.temperature,
+            effort=target.effort,
+            max_tokens=config.max_tokens,
+        )
+    except OpenRouterError as exc:
+        # A per-attempt API failure (e.g. HTTP 402 out-of-credit, or provider
+        # 5xx after retries are exhausted) must not abort the whole multi-model
+        # run. Record it as a failed attempt with the error surfaced in stderr
+        # and let every other (target, problem) proceed.
+        attempt = Attempt(
+            code=None,
+            latency_ms=0.0,
+            ttft_ms=None,
+            prompt_tokens=0,
+            completion_tokens=0,
+            cost_usd=0.0,
+            price_source="api",
+            raw_response="",
+        )
+        exec_result = ExecResult(
+            passed=False,
+            stdout="",
+            stderr=f"API error (no attempt made): {exc}",
+            exit_code=-1,
+            duration_ms=0.0,
+            timed_out=False,
+        )
+        return attempt, exec_result
     await guard.record(attempt.cost_usd)
 
     code = extract_code(attempt.raw_response, problem.language)

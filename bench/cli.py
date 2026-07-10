@@ -40,6 +40,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    f"(default {cfg.DEFAULT_TIMEOUT})")
     p.add_argument("--max-spend", type=float, dest="max_spend",
                    help=f"USD spend cap for the run (default {cfg.DEFAULT_MAX_SPEND_USD})")
+    p.add_argument("--max-tokens", type=int, dest="max_tokens",
+                   help="cap completion tokens per request. Also bounds the credits "
+                   "OpenRouter reserves up front, avoiding HTTP 402 on low-balance keys "
+                   "(default: the model's own max, which can be very large)")
     p.add_argument("--dry-run", action="store_true",
                    help="price the run and exit before any paid API call")
     p.add_argument("--prompt-style", choices=["strict", "loose"],
@@ -121,6 +125,7 @@ async def _amain(args: argparse.Namespace) -> int:
             temperature=args.temp,
             timeout=args.timeout,
             max_spend_usd=args.max_spend,
+            max_tokens=args.max_tokens,
             dry_run=args.dry_run,
             prompt_style=args.prompt_style,
         )

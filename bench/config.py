@@ -162,6 +162,7 @@ def build_run_config(
     temperature: float | None = None,
     timeout: float | None = None,
     max_spend_usd: float | None = None,
+    max_tokens: int | None = None,
     dry_run: bool = False,
     prompt_style: str | None = None,
     models_yaml: str | Path | None = None,
@@ -201,5 +202,6 @@ def build_run_config(
         ),
         dry_run=dry_run,
         prompt_style=style,  # type: ignore[arg-type]
+        max_tokens=max_tokens,
         targets=targets,
     )

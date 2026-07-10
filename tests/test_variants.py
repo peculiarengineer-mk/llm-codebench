@@ -1,5 +1,6 @@
 """Tests for reasoning-effort model variants (config fan-out + wire param)."""
 
+import asyncio
 import json
 
 import httpx
@@ -7,7 +8,8 @@ import pytest
 
 from bench.config import build_run_config, expand_targets
 from bench.cost import estimate_run
-from bench.openrouter import ModelPricing, OpenRouterClient
+from bench.openrouter import ModelPricing, OpenRouterClient, OpenRouterError
+from bench.runner import run_benchmark
 from bench.types import Language, ModelSpec, Problem, RunConfig, target_label
 
 
@@ -182,3 +184,51 @@ async def test_no_effort_omits_reasoning_param():
     async with client:
         await client.complete("m", "p", 0.0)
     assert "reasoning" not in captured["payload"]
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_forwarded_to_payload():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, content=_BODY)
+
+    client = OpenRouterClient("k")
+    client._client = httpx.AsyncClient(
+        base_url="https://openrouter.ai/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    client._price_overrides = {}
+    client._pricing_cache = {"m": ModelPricing(0.0, 0.0, "api")}
+    async with client:
+        await client.complete("m", "p", 0.0, max_tokens=4000)
+    assert captured["payload"]["max_tokens"] == 4000
+
+
+# --------------------------------------------------------------------------- #
+# Resilience: one model's API failure must not abort the whole run
+# --------------------------------------------------------------------------- #
+
+
+class _FailingClient:
+    """Stub OpenRouterClient whose every completion raises (e.g. HTTP 402)."""
+
+    async def complete(self, *a, **kw):
+        raise OpenRouterError("HTTP 402 from OpenRouter: out of credits")
+
+
+def test_run_survives_api_failure_and_records_it():
+    problems = [_problem()]
+    targets = expand_targets([ModelSpec(id="m")])
+    cfg = RunConfig(
+        models=["m"], k=2, temperature=0.7, timeout=10.0, max_spend_usd=5.0,
+        dry_run=False, prompt_style="strict", targets=targets,
+    )
+    run = asyncio.run(run_benchmark(cfg, problems, _FailingClient()))
+    # The run completes instead of crashing; the failure is captured, not passed.
+    assert len(run.results) == 1
+    pr = run.results[0]
+    assert pr.pass_at_k == 0.0
+    assert all(e.exit_code == -1 for e in pr.exec_results)
+    assert "402" in pr.exec_results[0].stderr
