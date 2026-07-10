@@ -147,11 +147,16 @@ class OpenRouterClient:
         temperature: float,
         *,
         max_tokens: int | None = None,
+        effort: str | None = None,
     ) -> Attempt:
         """Stream one completion and return a fully-costed :class:`Attempt`.
 
-        Network/HTTP failures are retried with exponential backoff + jitter up to
-        ``max_retries``; the final failure raises :class:`OpenRouterError`.
+        ``effort`` (``"low"``/``"medium"``/``"high"``), when set, is sent via
+        OpenRouter's unified ``reasoning.effort`` param — mapped per-provider to
+        the model's native reasoning control. Models without a reasoning mode
+        ignore it. Network/HTTP failures are retried with exponential backoff +
+        jitter up to ``max_retries``; the final failure raises
+        :class:`OpenRouterError`.
         """
         pricing = await self._pricing_for(model)
         payload: dict = {
@@ -163,6 +168,8 @@ class OpenRouterClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        if effort is not None:
+            payload["reasoning"] = {"effort": effort}
 
         last_exc: Exception | None = None
         attempts_made = 0

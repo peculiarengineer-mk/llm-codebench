@@ -9,6 +9,14 @@
 #   models:
 #     - id: <openrouter/model-id>
 #       price_override: <float | null>   # optional; USD per token
+#       efforts: [low, medium, high]     # optional; reasoning-effort fan-out
+#
+# `efforts` sweeps one model across reasoning levels: the entry expands into one
+# benchmark target per level, each a separate leaderboard row labelled
+# "<id> (<effort>)". Effort is sent via OpenRouter's unified reasoning.effort
+# param (mapped per-provider); models without a reasoning mode ignore it. Omit
+# `efforts` for a single, effort-less run. A run-wide `--efforts low,high` flag
+# overrides these per-entry lists for every selected model.
 #
 # Discover ids at https://openrouter.ai/models
 

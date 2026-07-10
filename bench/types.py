@@ -131,6 +131,22 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+# Reasoning-effort levels accepted by OpenRouter's unified ``reasoning.effort``
+# param (mapped per-provider: Anthropic thinking budget, OpenAI reasoning effort,
+# etc.). ``None`` means "send no reasoning field" — the model's own default.
+Effort = Literal["low", "medium", "high"]
+VALID_EFFORTS: tuple[str, ...] = ("low", "medium", "high")
+
+
+def target_label(model_id: str, effort: str | None) -> str:
+    """Display/grouping identity for one (model, effort) benchmark target.
+
+    Single source of truth for how a variant reads in the leaderboard, CSV, and
+    HTML report, e.g. ``"anthropic/claude-opus-4.8 (high)"``. With no effort the
+    label is just the model id, so non-reasoning models are unchanged.
+    """
+    return model_id if effort is None else f"{model_id} ({effort})"
+
 
 class Language(str, Enum):
     """Languages the harness can benchmark."""
@@ -169,8 +185,30 @@ class Problem(_Frozen):
     prompt_token_estimate: int = 0
 
 
+class RunTarget(_Frozen):
+    """A resolved benchmark target: one OpenRouter model at one reasoning effort.
+
+    ``label`` is the display/grouping identity used everywhere results are keyed
+    (leaderboard, CSV/JSON, HTML) — see :func:`target_label`. ``model`` is the
+    real OpenRouter id sent on the wire; ``effort`` is passed via OpenRouter's
+    ``reasoning.effort`` (``None`` = model default, no reasoning field sent).
+    ``price_override`` mirrors :class:`ModelSpec` and is keyed by ``model``.
+    """
+
+    label: str
+    model: str
+    effort: Effort | None = None
+    price_override: float | None = None
+
+
 class RunConfig(_Frozen):
-    """Resolved configuration for a single benchmark run (built by T1 config)."""
+    """Resolved configuration for a single benchmark run (built by T1 config).
+
+    ``models`` is the list of target *labels* (kept for provenance/back-compat);
+    ``targets`` carries the resolved (model, effort) pairs the runner and cost
+    estimator iterate. When ``targets`` is empty, consumers fall back to treating
+    each ``models`` entry as a plain, effort-less target.
+    """
 
     models: list[str]
     k: int
@@ -179,6 +217,7 @@ class RunConfig(_Frozen):
     max_spend_usd: float
     dry_run: bool
     prompt_style: Literal["strict", "loose"]
+    targets: list[RunTarget] = Field(default_factory=list)
 
 
 class Attempt(_Frozen):
@@ -251,17 +290,25 @@ class ModelSpec(_Frozen):
     """One entry from config/models.yaml.
 
     ``price_override`` is USD per token; when set, attempts against this model
-    record ``price_source="config"`` instead of ``"api"``.
+    record ``price_source="config"`` instead of ``"api"``. ``efforts`` is an
+    optional fan-out list of reasoning-effort levels: one entry with
+    ``efforts: [low, medium, high]`` expands into three benchmark targets sharing
+    the same model id. Absent/empty ``efforts`` means a single effort-less target.
     """
 
     id: str
     price_override: float | None = Field(default=None)
+    efforts: list[Effort] | None = Field(default=None)
 
 
 __all__ = [
     "Language",
+    "Effort",
+    "VALID_EFFORTS",
+    "target_label",
     "Problem",
     "RunConfig",
+    "RunTarget",
     "Attempt",
     "ExecResult",
     "ProblemResult",

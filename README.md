@@ -75,8 +75,29 @@ llm-codebench --dry-run
 llm-codebench --langs python,typescript --k 3 --max-spend 2.00 --out results/
 ```
 
-Common flags: `--models`, `--langs`, `--k`, `--temp`, `--timeout`,
+Common flags: `--models`, `--efforts`, `--langs`, `--k`, `--temp`, `--timeout`,
 `--max-spend`, `--dry-run`, `--prompt-style {strict,loose}`, `--out`.
+
+### Reasoning-effort variants
+
+The same model can be benchmarked across reasoning-effort levels to trace its
+cost-vs-quality curve. Each level becomes its own leaderboard row, labelled
+`<model> (<effort>)`, and effort is sent via OpenRouter's unified
+`reasoning.effort` param (mapped per provider; non-reasoning models ignore it):
+
+```bash
+# Sweep one model across all three levels
+llm-codebench --models anthropic/claude-opus-4.8 --efforts low,medium,high --dry-run
+```
+
+Or pin levels per model in `config/models.yaml` with an `efforts:` fan-out:
+
+```yaml
+- id: anthropic/claude-opus-4.8
+  efforts: [low, medium, high]   # → three targets, three leaderboard rows
+```
+
+A run-wide `--efforts` overrides the per-entry lists for every selected model.
 
 ## Configuration
 

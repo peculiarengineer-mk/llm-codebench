@@ -28,6 +28,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--models", help="comma-separated OpenRouter model ids "
                    "(default: every id in config/models.yaml)")
+    p.add_argument("--efforts", help="comma-separated reasoning-effort levels "
+                   "(low,medium,high) to sweep every selected model across; "
+                   "overrides per-entry 'efforts' in config/models.yaml")
     p.add_argument("--langs", help="comma-separated languages to run "
                    "(python,csharp,typescript,bash); default: all")
     p.add_argument("--k", type=int, help=f"attempts per problem (default {cfg.DEFAULT_K})")
@@ -103,17 +106,27 @@ async def _amain(args: argparse.Namespace) -> int:
     specs = cfg.load_model_specs()
     price_overrides = {s.id: s.price_override for s in specs if s.price_override is not None}
     models = [m.strip() for m in args.models.split(",")] if args.models else None
+    efforts = (
+        [e.strip() for e in args.efforts.split(",") if e.strip()]
+        if args.efforts
+        else None
+    )
     langs = _parse_langs(args.langs)
 
-    run_config = cfg.build_run_config(
-        models=models,
-        k=args.k,
-        temperature=args.temp,
-        timeout=args.timeout,
-        max_spend_usd=args.max_spend,
-        dry_run=args.dry_run,
-        prompt_style=args.prompt_style,
-    )
+    try:
+        run_config = cfg.build_run_config(
+            models=models,
+            efforts=efforts,
+            k=args.k,
+            temperature=args.temp,
+            timeout=args.timeout,
+            max_spend_usd=args.max_spend,
+            dry_run=args.dry_run,
+            prompt_style=args.prompt_style,
+        )
+    except ValueError as exc:
+        console.print(f"[red]Config error:[/red] {exc}")
+        return 2
 
     try:
         problems = load_problems(args.problems, langs, args.filter)

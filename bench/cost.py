@@ -11,7 +11,7 @@ import asyncio
 from dataclasses import dataclass, field
 
 from bench.openrouter import ModelPricing
-from bench.types import Problem, RunConfig
+from bench.types import Problem, RunConfig, RunTarget
 
 # Heuristic: average completion length (tokens) assumed per attempt when we have
 # no real usage yet. Deliberately generous so estimates lean high, not low.
@@ -65,19 +65,23 @@ def estimate_run(
     per_model: list[ModelCostEstimate] = []
     prompt_tokens_total = sum(p.prompt_token_estimate + PROMPT_WRAPPER_TOKENS for p in problems)
 
-    for model in config.models:
+    # Iterate resolved targets so each reasoning-effort variant is a distinct
+    # priced row; fall back to plain model ids for pre-variant configs. Pricing
+    # is keyed by the real model id, the row is labelled by the variant.
+    targets = config.targets or [RunTarget(label=m, model=m) for m in config.models]
+    for target in targets:
         calls = len(problems) * config.k
         est_prompt = prompt_tokens_total * config.k
         est_completion = len(problems) * config.k * completion_tokens
-        price = pricing.get(model)
+        price = pricing.get(target.model)
         if price is None:
             per_model.append(
-                ModelCostEstimate(model, calls, est_prompt, est_completion, 0.0, False)
+                ModelCostEstimate(target.label, calls, est_prompt, est_completion, 0.0, False)
             )
         else:
             cost = price.cost(est_prompt, est_completion)
             per_model.append(
-                ModelCostEstimate(model, calls, est_prompt, est_completion, cost, True)
+                ModelCostEstimate(target.label, calls, est_prompt, est_completion, cost, True)
             )
     return CostEstimate(per_model=per_model)
 

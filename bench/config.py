@@ -14,7 +14,13 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
-from bench.types import ModelSpec, RunConfig
+from bench.types import (
+    VALID_EFFORTS,
+    ModelSpec,
+    RunConfig,
+    RunTarget,
+    target_label,
+)
 
 # Load .env from the project root (and cwd) at import time.
 load_dotenv()
@@ -79,8 +85,13 @@ def load_model_specs(path: str | Path | None = None) -> list[ModelSpec]:
             model_id = entry.get("id")
             if not model_id:
                 raise ValueError(f"{yaml_path}: model entry missing 'id': {entry!r}")
+            efforts = _validate_efforts(entry.get("efforts"), where=f"{yaml_path}: {model_id}")
             specs.append(
-                ModelSpec(id=model_id, price_override=entry.get("price_override"))
+                ModelSpec(
+                    id=model_id,
+                    price_override=entry.get("price_override"),
+                    efforts=efforts,
+                )
             )
         else:
             raise ValueError(
@@ -90,9 +101,63 @@ def load_model_specs(path: str | Path | None = None) -> list[ModelSpec]:
     return specs
 
 
+def _validate_efforts(raw: object, *, where: str) -> list[str] | None:
+    """Normalize a raw ``efforts`` value (from YAML or CLI) to a checked list.
+
+    Accepts ``None`` (→ ``None``), a single string, or a list of strings. Every
+    level must be one of :data:`~bench.types.VALID_EFFORTS`; order is preserved
+    and duplicates are dropped so a sweep stays deterministic.
+    """
+    if raw is None:
+        return None
+    values = [raw] if isinstance(raw, str) else list(raw)
+    seen: list[str] = []
+    for value in values:
+        level = str(value).strip().lower()
+        if level not in VALID_EFFORTS:
+            valid = ", ".join(VALID_EFFORTS)
+            raise ValueError(f"{where}: invalid effort {value!r} (valid: {valid})")
+        if level not in seen:
+            seen.append(level)
+    return seen or None
+
+
+def expand_targets(
+    specs: list[ModelSpec], *, efforts_override: list[str] | None = None
+) -> list[RunTarget]:
+    """Fan out model specs into resolved :class:`RunTarget` benchmark targets.
+
+    Each spec with ``efforts`` (or the run-wide ``efforts_override``, which wins
+    for every model) yields one target per effort level; a spec with no efforts
+    yields a single effort-less target. Labels come from
+    :func:`~bench.types.target_label`, so a model swept across levels shows up as
+    distinct leaderboard rows.
+    """
+    targets: list[RunTarget] = []
+    for spec in specs:
+        levels: list[str | None]
+        if efforts_override is not None:
+            levels = list(efforts_override)
+        elif spec.efforts:
+            levels = list(spec.efforts)
+        else:
+            levels = [None]
+        for effort in levels:
+            targets.append(
+                RunTarget(
+                    label=target_label(spec.id, effort),
+                    model=spec.id,
+                    effort=effort,  # type: ignore[arg-type]
+                    price_override=spec.price_override,
+                )
+            )
+    return targets
+
+
 def build_run_config(
     *,
     models: list[str] | None = None,
+    efforts: list[str] | None = None,
     k: int | None = None,
     temperature: float | None = None,
     timeout: float | None = None,
@@ -103,18 +168,31 @@ def build_run_config(
 ) -> RunConfig:
     """Build a :class:`RunConfig` from CLI-supplied overrides with sane defaults.
 
-    ``models`` defaults to every id in ``config/models.yaml`` when not supplied.
-    All other fields fall back to the module-level ``DEFAULT_*`` constants.
+    ``models`` defaults to every id in ``config/models.yaml`` when not supplied;
+    ids passed explicitly still inherit any ``price_override``/``efforts`` from a
+    matching yaml entry. ``efforts`` (e.g. ``["low", "high"]``) is a run-wide
+    override that fans every selected model across those reasoning levels,
+    ignoring per-entry ``efforts``. All other fields fall back to the
+    module-level ``DEFAULT_*`` constants.
     """
-    if not models:
-        models = [spec.id for spec in load_model_specs(models_yaml)]
+    specs = load_model_specs(models_yaml)
+    by_id = {spec.id: spec for spec in specs}
+
+    if models:
+        # Honor an explicit --models list, inheriting yaml metadata when present.
+        selected = [by_id.get(mid, ModelSpec(id=mid)) for mid in models]
+    else:
+        selected = specs
+
+    efforts_override = _validate_efforts(efforts, where="--efforts") if efforts else None
+    targets = expand_targets(selected, efforts_override=efforts_override)
 
     style = prompt_style or DEFAULT_PROMPT_STYLE
     if style not in ("strict", "loose"):
         raise ValueError(f"prompt_style must be 'strict' or 'loose', got {style!r}")
 
     return RunConfig(
-        models=list(models),
+        models=[t.label for t in targets],
         k=k if k is not None else DEFAULT_K,
         temperature=temperature if temperature is not None else DEFAULT_TEMPERATURE,
         timeout=timeout if timeout is not None else DEFAULT_TIMEOUT,
@@ -123,4 +201,5 @@ def build_run_config(
         ),
         dry_run=dry_run,
         prompt_style=style,  # type: ignore[arg-type]
+        targets=targets,
     )

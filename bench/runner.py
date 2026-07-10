@@ -23,7 +23,20 @@ from bench.types import (
     ProblemResult,
     RunConfig,
     RunResult,
+    RunTarget,
 )
+
+
+def resolve_targets(config: RunConfig) -> list[RunTarget]:
+    """The benchmark targets for a run, back-compatible with older callers.
+
+    Uses ``config.targets`` when present; otherwise treats each ``config.models``
+    entry as a plain, effort-less target so configs built before reasoning-effort
+    variants existed still run unchanged.
+    """
+    if config.targets:
+        return list(config.targets)
+    return [RunTarget(label=m, model=m) for m in config.models]
 
 
 def pass_at_k(n: int, c: int, k: int) -> float:
@@ -49,14 +62,16 @@ def pass_at_k(n: int, c: int, k: int) -> float:
 
 async def _run_one_attempt(
     client: OpenRouterClient,
-    model: str,
+    target: RunTarget,
     problem: Problem,
     config: RunConfig,
     guard: SpendGuard,
 ) -> tuple[Attempt, ExecResult]:
-    """One generation + sandbox execution for a (model, problem)."""
+    """One generation + sandbox execution for a (target, problem)."""
     prompt = render_prompt(problem, config.prompt_style)
-    attempt = await client.complete(model, prompt, config.temperature)
+    attempt = await client.complete(
+        target.model, prompt, config.temperature, effort=target.effort
+    )
     await guard.record(attempt.cost_usd)
 
     code = extract_code(attempt.raw_response, problem.language)
@@ -86,13 +101,13 @@ async def _run_one_attempt(
 
 async def _run_problem_for_model(
     client: OpenRouterClient,
-    model: str,
+    target: RunTarget,
     problem: Problem,
     config: RunConfig,
     guard: SpendGuard,
     sem: asyncio.Semaphore,
 ) -> ProblemResult:
-    """Run all ``k`` attempts for one (model, problem) and score them."""
+    """Run all ``k`` attempts for one (target, problem) and score them."""
     attempts: list[Attempt] = []
     exec_results: list[ExecResult] = []
 
@@ -101,7 +116,7 @@ async def _run_problem_for_model(
             break
         async with sem:
             attempt, exec_result = await _run_one_attempt(
-                client, model, problem, config, guard
+                client, target, problem, config, guard
             )
         attempts.append(attempt)
         exec_results.append(exec_result)
@@ -109,7 +124,7 @@ async def _run_problem_for_model(
     n = len(attempts)
     c = sum(1 for e in exec_results if e.passed)
     return ProblemResult(
-        model=model,
+        model=target.label,
         problem_slug=problem.slug,
         language=problem.language,
         pass_at_1=pass_at_k(n, c, 1) if n else 0.0,
@@ -136,10 +151,11 @@ async def run_benchmark(
     """
     guard = guard or SpendGuard(config.max_spend_usd)
     sem = asyncio.Semaphore(concurrency)
+    targets = resolve_targets(config)
 
     tasks = [
-        _run_problem_for_model(client, model, problem, config, guard, sem)
-        for model in config.models
+        _run_problem_for_model(client, target, problem, config, guard, sem)
+        for target in targets
         for problem in problems
     ]
     results: list[ProblemResult] = await asyncio.gather(*tasks)
@@ -152,7 +168,7 @@ async def run_benchmark(
         results=results,
         total_cost_usd=total_cost,
         total_latency_ms=total_latency,
-        models=list(config.models),
+        models=[t.label for t in targets],
         problems_count=len(problems),
         k=config.k,
         total_retries=total_retries,
@@ -172,4 +188,4 @@ def dry_run_estimate(
     return estimate_run(config, problems, pricing)
 
 
-__all__ = ["run_benchmark", "pass_at_k", "dry_run_estimate"]
+__all__ = ["run_benchmark", "pass_at_k", "dry_run_estimate", "resolve_targets"]
