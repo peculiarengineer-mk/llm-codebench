@@ -195,6 +195,10 @@ async def _amain(args: argparse.Namespace) -> int:
         )
 
     # -- report -------------------------------------------------------------
+    if result.aborted_reason:
+        console.print(f"\n[red bold]{result.aborted_reason}[/red bold]")
+        console.print("[yellow]Tip: pass --max-tokens to shrink the up-front credit "
+                      "reservation, or top up the key. Results below are partial.[/yellow]\n")
     render_cli(result)
     out_dir = Path(args.out)
     json_path, csv_path = export_raw(result, out_dir)

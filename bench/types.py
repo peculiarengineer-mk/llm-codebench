@@ -290,6 +290,7 @@ class RunResult(_Frozen):
     timeout: float | None = None
     prompt_style: str | None = None
     generated_at: str | None = None  # ISO-8601 UTC timestamp of the run
+    aborted_reason: str | None = None  # set when a fatal API error halted the run
 
 
 class ModelSpec(_Frozen):

@@ -119,6 +119,7 @@ class SpendGuard:
         self._spent = 0.0
         self._lock = asyncio.Lock()
         self.stopped = False
+        self.abort_reason: str | None = None
 
     @property
     def spent(self) -> float:
@@ -128,8 +129,20 @@ class SpendGuard:
     def cap(self) -> float:
         return self._cap
 
+    def abort(self, reason: str) -> None:
+        """Halt the run for a non-spend reason (e.g. a fatal auth/billing error).
+
+        Idempotent — the first reason wins, so the message reflects the failure
+        that actually stopped the run. ``can_proceed`` returns False thereafter.
+        """
+        if self.abort_reason is None:
+            self.abort_reason = reason
+        self.stopped = True
+
     async def can_proceed(self) -> bool:
         async with self._lock:
+            if self.abort_reason is not None:
+                return False
             if self._spent >= self._cap:
                 self.stopped = True
                 return False

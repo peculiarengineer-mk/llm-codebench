@@ -36,11 +36,28 @@ class ModelPricing:
 
 
 class OpenRouterError(RuntimeError):
-    """Raised when OpenRouter fails after all retries."""
+    """Raised when OpenRouter fails (after retries for transient errors).
+
+    ``status_code`` is the HTTP status when the failure was an HTTP response, or
+    ``None`` for transport/timeout errors. Statuses in :data:`FATAL_STATUS` are
+    run-fatal — auth/billing problems that neither a retry nor continuing the
+    rest of the run will resolve.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 # HTTP statuses worth retrying (rate limit + transient server errors).
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+# Account-wide auth/billing failures that won't resolve by retrying or by
+# continuing the run: 401 (bad/expired key) and 402 (out of credits). These
+# justify aborting the whole run. 403 is deliberately excluded — it is usually
+# per-model (the key lacks access to one model), so it's recorded as that
+# model's api-error without killing the other models.
+FATAL_STATUS = {401, 402}
 
 
 class OpenRouterClient:
@@ -187,7 +204,8 @@ class OpenRouterClient:
         tries = "try" if attempts_made == 1 else "tries"
         raise OpenRouterError(
             f"OpenRouter request for {model!r} failed after {attempts_made} "
-            f"{tries}: {last_exc}"
+            f"{tries}: {last_exc}",
+            status_code=getattr(last_exc, "status_code", None),
         ) from last_exc
 
     async def _stream_once(
@@ -206,11 +224,15 @@ class OpenRouterClient:
             if resp.status_code in _RETRYABLE_STATUS:
                 await resp.aread()
                 raise OpenRouterError(
-                    f"HTTP {resp.status_code} from OpenRouter (retryable)"
+                    f"HTTP {resp.status_code} from OpenRouter (retryable)",
+                    status_code=resp.status_code,
                 )
             if resp.status_code >= 400:
                 body = (await resp.aread()).decode("utf-8", "replace")
-                raise OpenRouterError(f"HTTP {resp.status_code} from OpenRouter: {body[:500]}")
+                raise OpenRouterError(
+                    f"HTTP {resp.status_code} from OpenRouter: {body[:500]}",
+                    status_code=resp.status_code,
+                )
 
             async for line in resp.aiter_lines():
                 if not line or not line.startswith("data:"):
@@ -292,4 +314,4 @@ def _is_retryable(exc: Exception) -> bool:
     return isinstance(exc, (httpx.TransportError, httpx.TimeoutException))
 
 
-__all__ = ["OpenRouterClient", "OpenRouterError", "ModelPricing"]
+__all__ = ["OpenRouterClient", "OpenRouterError", "ModelPricing", "FATAL_STATUS"]

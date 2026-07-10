@@ -13,7 +13,12 @@ from math import comb
 
 from bench.cost import CostEstimate, SpendGuard, estimate_run
 from bench.extract import extract_code
-from bench.openrouter import ModelPricing, OpenRouterClient, OpenRouterError
+from bench.openrouter import (
+    FATAL_STATUS,
+    ModelPricing,
+    OpenRouterClient,
+    OpenRouterError,
+)
 from bench.problems import render_prompt
 from bench.sandbox import run_in_sandbox
 from bench.types import (
@@ -78,10 +83,16 @@ async def _run_one_attempt(
             max_tokens=config.max_tokens,
         )
     except OpenRouterError as exc:
-        # A per-attempt API failure (e.g. HTTP 402 out-of-credit, or provider
-        # 5xx after retries are exhausted) must not abort the whole multi-model
-        # run. Record it as a failed attempt with the error surfaced in stderr
-        # and let every other (target, problem) proceed.
+        # A per-attempt API failure (e.g. provider 5xx after retries) must not
+        # abort the whole multi-model run: record it as a failed attempt and let
+        # every other (target, problem) proceed. But an auth/billing failure
+        # (401/402/403) won't fix itself, so signal a run-wide abort — the rest
+        # of the queued attempts then short-circuit instead of hammering the API.
+        if exc.status_code in FATAL_STATUS:
+            guard.abort(
+                f"Run aborted — OpenRouter returned HTTP {exc.status_code} "
+                f"(auth/billing). Top up or check the key; no further calls made."
+            )
         attempt = Attempt(
             code=None,
             latency_ms=0.0,
@@ -145,6 +156,11 @@ async def _run_problem_for_model(
         if not await guard.can_proceed():
             break
         async with sem:
+            # Re-check after acquiring a slot: an abort (fatal API error) or the
+            # spend cap may have tripped while this attempt was queued behind the
+            # semaphore, so don't fire a call that's already known to be futile.
+            if not await guard.can_proceed():
+                break
             attempt, exec_result = await _run_one_attempt(
                 client, target, problem, config, guard
             )
@@ -210,6 +226,7 @@ async def run_benchmark(
         timeout=config.timeout,
         prompt_style=config.prompt_style,
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        aborted_reason=guard.abort_reason,
     )
 
 

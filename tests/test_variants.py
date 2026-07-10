@@ -244,6 +244,30 @@ def test_run_survives_api_failure_and_records_it():
     assert all(a.error is not None for a in pr.attempts)
 
 
+def test_fatal_402_aborts_run_early_instead_of_hammering():
+    """A billing 402 halts the whole run; queued attempts short-circuit."""
+    calls = {"n": 0}
+
+    class Fatal402Client:
+        async def complete(self, *a, **kw):
+            calls["n"] += 1
+            raise OpenRouterError("HTTP 402: out of credits", status_code=402)
+
+    # 3 problems x k=3 = 9 attempts if it hammered; abort should cut it far short.
+    problems = [_problem(), _problem(), _problem()]
+    targets = expand_targets([ModelSpec(id="m")])
+    cfg = RunConfig(
+        models=["m"], k=3, temperature=0.7, timeout=10.0, max_spend_usd=5.0,
+        dry_run=False, prompt_style="strict", targets=targets,
+    )
+    run = asyncio.run(run_benchmark(cfg, problems, Fatal402Client(), concurrency=1))
+    assert run.aborted_reason is not None
+    assert "402" in run.aborted_reason
+    # With concurrency=1 the abort trips on attempt 1, so the remaining 8 are
+    # skipped — far fewer than the 9 a non-aborting run would have made.
+    assert calls["n"] == 1
+
+
 def test_api_error_classified_distinctly_from_no_code():
     from bench.report import _classify
     from bench.types import ExecResult
