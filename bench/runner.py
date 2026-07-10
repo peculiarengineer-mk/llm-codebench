@@ -91,6 +91,7 @@ async def _run_one_attempt(
             cost_usd=0.0,
             price_source="api",
             raw_response="",
+            error=str(exc),
         )
         exec_result = ExecResult(
             passed=False,
@@ -150,8 +151,12 @@ async def _run_problem_for_model(
         attempts.append(attempt)
         exec_results.append(exec_result)
 
-    n = len(attempts)
-    c = sum(1 for e in exec_results if e.passed)
+    # Score only attempts that actually reached the model. An attempt that failed
+    # at the API layer (e.g. HTTP 402) never sampled it, so counting it toward
+    # pass@k would penalize the model for a billing/infra failure.
+    scored = [(a, e) for a, e in zip(attempts, exec_results) if a.error is None]
+    n = len(scored)
+    c = sum(1 for _, e in scored if e.passed)
     return ProblemResult(
         model=target.label,
         problem_slug=problem.slug,

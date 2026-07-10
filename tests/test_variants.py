@@ -10,7 +10,15 @@ from bench.config import build_run_config, expand_targets
 from bench.cost import estimate_run
 from bench.openrouter import ModelPricing, OpenRouterClient, OpenRouterError
 from bench.runner import run_benchmark
-from bench.types import Language, ModelSpec, Problem, RunConfig, target_label
+from bench.types import (
+    Attempt,
+    ExecResult,
+    Language,
+    ModelSpec,
+    Problem,
+    RunConfig,
+    target_label,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -232,3 +240,54 @@ def test_run_survives_api_failure_and_records_it():
     assert pr.pass_at_k == 0.0
     assert all(e.exit_code == -1 for e in pr.exec_results)
     assert "402" in pr.exec_results[0].stderr
+    # API failures are structurally flagged, not silently bucketed as "no code".
+    assert all(a.error is not None for a in pr.attempts)
+
+
+def test_api_error_classified_distinctly_from_no_code():
+    from bench.report import _classify
+    from bench.types import ExecResult
+
+    fail_ex = ExecResult(passed=False, stdout="", stderr="x", exit_code=-1,
+                         duration_ms=0.0, timed_out=False)
+    api = Attempt(code=None, latency_ms=0.0, ttft_ms=None, prompt_tokens=0,
+                  completion_tokens=0, cost_usd=0.0, price_source="api",
+                  raw_response="", error="HTTP 402")
+    no_code = api.model_copy(update={"error": None})
+    assert _classify(api, fail_ex) == "api_error"
+    assert _classify(no_code, fail_ex) == "no_code"
+
+
+def test_errored_attempts_excluded_so_one_real_pass_counts(monkeypatch):
+    """One real passing attempt among 402s => problem solved (errors ignored)."""
+    from bench import runner as R
+
+    calls = {"n": 0}
+
+    class MixedClient:
+        async def complete(self, *a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:  # first attempt reaches the model and answers
+                return Attempt(
+                    code=None, latency_ms=1.0, ttft_ms=1.0, prompt_tokens=1,
+                    completion_tokens=1, cost_usd=0.0, price_source="api",
+                    raw_response="ok",
+                )
+            raise OpenRouterError("HTTP 402 from OpenRouter")  # rest run out of credit
+
+    async def fake_sandbox(*a, **kw):
+        return ExecResult(passed=True, stdout="", stderr="", exit_code=0,
+                         duration_ms=1.0, timed_out=False)
+
+    monkeypatch.setattr(R, "extract_code", lambda raw, lang: "code")
+    monkeypatch.setattr(R, "run_in_sandbox", fake_sandbox)
+
+    cfg = RunConfig(
+        models=["m"], k=3, temperature=0.7, timeout=10.0, max_spend_usd=5.0,
+        dry_run=False, prompt_style="strict",
+        targets=expand_targets([ModelSpec(id="m")]),
+    )
+    run = asyncio.run(run_benchmark(cfg, [_problem()], MixedClient()))
+    pr = run.results[0]
+    assert pr.pass_at_k == 1.0  # single real sample passed; the two 402s ignored
+    assert sum(1 for a in pr.attempts if a.error is not None) == 2

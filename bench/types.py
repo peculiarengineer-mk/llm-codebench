@@ -239,6 +239,11 @@ class Attempt(_Frozen):
     price_source: Literal["api", "config"]
     raw_response: str
     retries: int = 0  # network retries beyond the first try (0 = first-try OK)
+    # Set when the API call itself failed (e.g. HTTP 402 out-of-credit, provider
+    # 5xx after retries): the model was never sampled. Such attempts are reported
+    # as an "api error" — distinct from a model emitting no code — and excluded
+    # from pass@k so a billing/infra failure never scores as a wrong answer.
+    error: str | None = None
 
 
 class ExecResult(_Frozen):

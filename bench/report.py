@@ -34,28 +34,34 @@ from bench.types import Attempt, ExecResult, ProblemResult, RunResult
 # Failure classification + statistics
 # --------------------------------------------------------------------------- #
 
-# Human labels for the four mutually-exclusive per-attempt outcomes.
+# Human labels for the mutually-exclusive per-attempt outcomes.
 FAILURE_LABELS = {
     "pass": "pass",
     "failed": "wrong answer",
     "timeout": "timeout",
     "no_code": "no code",
+    "api_error": "api error",
 }
-FAILURE_ORDER = ["pass", "failed", "timeout", "no_code"]
+FAILURE_ORDER = ["pass", "failed", "timeout", "no_code", "api_error"]
 
 _Z95 = 1.959963984540054  # z for a 95% two-sided normal interval
 
 
 def _classify(attempt: Attempt, ex: ExecResult) -> str:
-    """Bucket one attempt into pass / failed / timeout / no_code.
+    """Bucket one attempt into pass / failed / timeout / no_code / api_error.
 
-    ``failed`` means the code ran but the hidden tests did not pass (wrong
-    answer or a runtime error) — the two are not reliably distinguishable across
-    languages from an exit code alone, so they share a bucket. ``no_code`` is the
-    extractor finding no usable code block in the model's reply.
+    ``api_error`` is an attempt that failed at the API layer (e.g. HTTP 402
+    out-of-credit) so the model was never sampled — kept distinct so a billing or
+    infra failure is never mistaken for the model producing no code. ``failed``
+    means the code ran but the hidden tests did not pass (wrong answer or a
+    runtime error) — not reliably distinguishable from an exit code alone, so
+    they share a bucket. ``no_code`` is the extractor finding no usable code
+    block in a reply the model actually returned.
     """
     if ex.passed:
         return "pass"
+    if attempt.error is not None:
+        return "api_error"
     if attempt.code is None:
         return "no_code"
     if ex.timed_out:
@@ -679,12 +685,15 @@ def export_raw(run: RunResult, out_dir: str | Path) -> tuple[Path, Path]:
         writer.writerow(
             ["model", "problem_slug", "language", "difficulty", "pass_at_1",
              "pass_at_k", "attempts", "passed_attempts", "timeouts", "no_code",
-             "total_cost_usd", "avg_latency_ms", "retries"]
+             "api_errors", "total_cost_usd", "avg_latency_ms", "retries"]
         )
         for pr in run.results:
             passed = sum(1 for e in pr.exec_results if e.passed)
             timeouts = sum(1 for e in pr.exec_results if e.timed_out)
-            no_code = sum(1 for a in pr.attempts if a.code is None)
+            api_errors = sum(1 for a in pr.attempts if a.error is not None)
+            # no_code = model returned a reply with no usable code (never-ran
+            # api_error attempts also have code=None, so exclude them here).
+            no_code = sum(1 for a in pr.attempts if a.code is None and a.error is None)
             cost = sum(a.cost_usd for a in pr.attempts)
             latencies = [a.latency_ms for a in pr.attempts]
             retries = sum(a.retries for a in pr.attempts)
@@ -700,6 +709,7 @@ def export_raw(run: RunResult, out_dir: str | Path) -> tuple[Path, Path]:
                     passed,
                     timeouts,
                     no_code,
+                    api_errors,
                     f"{cost:.6f}",
                     f"{(sum(latencies) / len(latencies)) if latencies else 0.0:.1f}",
                     retries,
