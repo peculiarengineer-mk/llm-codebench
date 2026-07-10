@@ -13,9 +13,17 @@ from dataclasses import dataclass, field
 from bench.openrouter import ModelPricing
 from bench.types import Problem, RunConfig, RunTarget
 
-# Heuristic: average completion length (tokens) assumed per attempt when we have
-# no real usage yet. Deliberately generous so estimates lean high, not low.
-DEFAULT_COMPLETION_TOKENS = 600
+# Heuristic: base completion length (tokens) for one attempt's *answer* — the
+# fenced solution — before any reasoning tokens. A full multi-language solution
+# routinely runs 800-2000 tokens, so 1200 is a middle estimate.
+DEFAULT_COMPLETION_TOKENS = 1200
+
+# Additional billed output (thinking) tokens assumed per reasoning-effort level.
+# Reasoning models emit these on top of the visible answer and OpenRouter bills
+# them as completion tokens, so a high-effort variant costs materially more than
+# a low-effort one. Rough, deliberately order-of-magnitude figures — tune freely.
+# An effort-less target (None) adds nothing.
+REASONING_TOKENS: dict[str, int] = {"low": 1000, "medium": 4000, "high": 10000}
 
 # Fixed prompt overhead (tokens) added by the strict/loose instruction wrapper.
 PROMPT_WRAPPER_TOKENS = 80
@@ -72,7 +80,9 @@ def estimate_run(
     for target in targets:
         calls = len(problems) * config.k
         est_prompt = prompt_tokens_total * config.k
-        est_completion = len(problems) * config.k * completion_tokens
+        # Higher reasoning effort adds billed thinking tokens on top of the answer.
+        per_call_completion = completion_tokens + REASONING_TOKENS.get(target.effort or "", 0)
+        est_completion = len(problems) * config.k * per_call_completion
         price = pricing.get(target.model)
         if price is None:
             per_model.append(
@@ -139,4 +149,5 @@ __all__ = [
     "SpendGuard",
     "SpendCapExceeded",
     "DEFAULT_COMPLETION_TOKENS",
+    "REASONING_TOKENS",
 ]

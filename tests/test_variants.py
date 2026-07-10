@@ -101,6 +101,33 @@ def test_estimate_one_row_per_variant_priced_by_real_id():
     assert all(r.priced for r in est.per_model)  # both variants found pricing via "m"
 
 
+def test_higher_effort_estimates_more_completion_tokens():
+    from bench.cost import DEFAULT_COMPLETION_TOKENS, REASONING_TOKENS
+
+    targets = expand_targets([ModelSpec(id="m", efforts=["low", "high"])])
+    cfg = RunConfig(
+        models=[t.label for t in targets], k=1, temperature=0.7, timeout=10.0,
+        max_spend_usd=5.0, dry_run=True, prompt_style="strict", targets=targets,
+    )
+    est = estimate_run(cfg, [_problem()], {})
+    low, high = est.per_model
+    # one problem, k=1 -> completion == base + per-effort reasoning budget
+    assert low.est_completion_tokens == DEFAULT_COMPLETION_TOKENS + REASONING_TOKENS["low"]
+    assert high.est_completion_tokens == DEFAULT_COMPLETION_TOKENS + REASONING_TOKENS["high"]
+    assert high.est_completion_tokens > low.est_completion_tokens
+
+
+def test_effortless_target_adds_no_reasoning_tokens():
+    from bench.cost import DEFAULT_COMPLETION_TOKENS
+
+    cfg = RunConfig(
+        models=["m"], k=1, temperature=0.7, timeout=10.0,
+        max_spend_usd=5.0, dry_run=True, prompt_style="strict",
+    )
+    est = estimate_run(cfg, [_problem()], {})
+    assert est.per_model[0].est_completion_tokens == DEFAULT_COMPLETION_TOKENS
+
+
 # --------------------------------------------------------------------------- #
 # Wire param: reasoning.effort
 # --------------------------------------------------------------------------- #
