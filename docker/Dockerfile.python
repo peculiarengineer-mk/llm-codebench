@@ -1,0 +1,13 @@
+# llm-codebench Python sandbox image.
+# Built offline once by bench.sandbox.ensure_images(); runs with --network none.
+FROM python:3.12-slim
+
+# pytest is the only runtime dependency the hidden tests need.
+RUN pip install --no-cache-dir pytest==8.* \
+    && useradd --create-home --uid 1000 runner
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+USER runner
+WORKDIR /tmp

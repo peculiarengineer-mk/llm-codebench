@@ -1,0 +1,3 @@
+difficulty: hard
+entrypoint: min_intervals_to_cover
+timeout: 15

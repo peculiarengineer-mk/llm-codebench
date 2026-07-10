@@ -1,0 +1,17 @@
+# llm-codebench C# sandbox image.
+# A console project is created AND built at image-build time so the NuGet cache
+# and restore artifacts (obj/project.assets.json) are warm. At run time the
+# sandbox copies this project to a writable tmpfs and runs `dotnet run
+# --no-restore`, which needs no network (--network none).
+FROM mcr.microsoft.com/dotnet/sdk:9.0
+
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
+    DOTNET_NOLOGO=1
+
+# Create + build a scratch console app to warm the restore cache. The template
+# Program.cs is removed at run time and replaced by Solution.cs + Tests.cs.
+RUN dotnet new console -o /app \
+    && dotnet build /app -c Release
+
+WORKDIR /app

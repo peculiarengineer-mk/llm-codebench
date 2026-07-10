@@ -1,0 +1,11 @@
+# llm-codebench TypeScript sandbox image.
+# tsx + typescript are installed globally so the sandbox never needs npm at run
+# time (runs with --network none). Built offline by ensure_images().
+FROM node:20-slim
+
+RUN npm install -g tsx@4 typescript@5 \
+    && npm cache clean --force
+
+# node:20-slim already ships a non-root `node` user (uid 1000).
+USER node
+WORKDIR /tmp
