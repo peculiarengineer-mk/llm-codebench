@@ -1,7 +1,13 @@
 """Report aggregation tests — untested-problem exclusion, headline, dedup."""
 
 from bench.config import expand_targets
-from bench.report import _headline, _model_rows, _untested, render_html
+from bench.report import (
+    _grouped_model_rows,
+    _headline,
+    _model_rows,
+    _untested,
+    render_html,
+)
 from bench.types import (
     Attempt,
     ExecResult,
@@ -9,6 +15,7 @@ from bench.types import (
     ModelSpec,
     ProblemResult,
     RunResult,
+    parse_effort,
 )
 
 
@@ -81,6 +88,47 @@ def test_fully_untested_model_not_crowned():
     assert _headline(_run(results), rows).startswith("good leads")
 
 
+def _filtered_att():
+    """An empty content-filter block: HTTP 200, no code, no error."""
+    return Attempt(
+        code=None, latency_ms=1.0, ttft_ms=None, prompt_tokens=5,
+        completion_tokens=1, cost_usd=0.0, price_source="api",
+        raw_response="", error=None, finish_reason="content_filter",
+    )
+
+
+def test_filtered_problem_excluded_from_passk_and_tracked_separately():
+    # fable-like: solves 1 real problem, gets content-filtered on another.
+    ok = _pr("fable", "p1", "easy", [(True, None)])
+    blocked = ProblemResult(
+        model="fable", problem_slug="p2", language=Language.python,
+        pass_at_1=0.0, pass_at_k=0.0,
+        attempts=[_filtered_att(), _filtered_att(), _filtered_att()],
+        exec_results=[_ex(False)] * 3, difficulty="easy",
+    )
+    row = _model_rows(_run([ok, blocked]))[0]
+    assert row["scored"] == 1              # only p1 counts
+    assert row["filtered_problems"] == 1   # p2 surfaced as filtered, not untested
+    assert row["untested"] == 0
+    assert row["pass_at_k"] == 1.0         # 1/1, not dragged to 50% by the block
+    assert row["fails"]["filtered"] == 3   # three filtered attempts tallied
+    assert row["fails"]["no_code"] == 0    # not miscounted as no-code
+
+
+def test_filtered_and_apierror_exclusions_are_distinct():
+    filt = ProblemResult(
+        model="m", problem_slug="pf", language=Language.python, pass_at_1=0.0,
+        pass_at_k=0.0, attempts=[_filtered_att()], exec_results=[_ex(False)],
+        difficulty="easy",
+    )
+    err = _pr("m", "pe", "easy", [(False, "402")])
+    good = _pr("m", "pg", "easy", [(True, None)])
+    row = _model_rows(_run([filt, err, good]))[0]
+    assert row["scored"] == 1
+    assert row["filtered_problems"] == 1   # pf
+    assert row["untested"] == 1            # pe (api error) — kept separate
+
+
 def test_headline_on_aborted_run():
     results = [_pr("m", "p1", "easy", [(False, "402")])]
     run = _run(results, aborted_reason="Run aborted — HTTP 402")
@@ -99,6 +147,58 @@ def test_html_shows_abort_banner(tmp_path):
     html = render_html(run, tmp_path / "r.html").read_text()
     assert "did not complete" in html.lower() or "402" in html
     assert "untested" in html.lower()
+
+
+def test_parse_effort_roundtrips_target_label():
+    assert parse_effort("anthropic/claude-opus-4.8 (high)") == "high"
+    assert parse_effort("anthropic/claude-opus-4.8 (low)") == "low"
+    # No suffix -> effort-less; a bare id with parens that isn't an effort stays None.
+    assert parse_effort("openai/gpt-5.6-luna") is None
+    assert parse_effort("some/model (turbo)") is None
+
+
+def test_grouped_rows_split_into_effort_sections_in_order():
+    results = [
+        _pr("m (high)", "p1", "easy", [(True, None)]),
+        _pr("m (low)", "p1", "easy", [(True, None)]),
+        _pr("m (medium)", "p1", "easy", [(True, None)]),
+        _pr("tierX", "p1", "easy", [(True, None)]),  # effort-less -> default
+    ]
+    sections = _grouped_model_rows(_run(results))
+    assert [s["effort"] for s in sections] == ["low", "medium", "high", None]
+    # Multi-section run qualifies each heading; effort-less is the "default" board.
+    assert sections[0]["title"] == "Leaderboard — low effort"
+    assert sections[-1]["title"] == "Leaderboard — default (no effort)"
+    assert [r["model"] for r in sections[0]["rows"]] == ["m (low)"]
+    assert [r["model"] for r in sections[-1]["rows"]] == ["tierX"]
+
+
+def test_grouped_rows_single_section_keeps_plain_title():
+    # A run with no effort variants stays one plain "Leaderboard".
+    results = [_pr("m", "p1", "easy", [(True, None)])]
+    sections = _grouped_model_rows(_run(results))
+    assert len(sections) == 1
+    assert sections[0]["title"] == "Leaderboard"
+    assert sections[0]["effort"] is None
+
+
+def test_grouped_rows_single_pinned_effort_keeps_plain_title():
+    # --efforts high -> only the high section exists, so no qualifier needed.
+    results = [_pr("m (high)", "p1", "easy", [(True, None)])]
+    sections = _grouped_model_rows(_run(results))
+    assert len(sections) == 1
+    assert sections[0]["title"] == "Leaderboard"
+    assert sections[0]["effort"] == "high"
+
+
+def test_html_renders_per_effort_section_headings(tmp_path):
+    results = [
+        _pr("m (low)", "p1", "easy", [(True, None)]),
+        _pr("m (high)", "p1", "easy", [(True, None)]),
+    ]
+    html = render_html(_run(results), tmp_path / "r.html").read_text()
+    assert "Leaderboard — low effort" in html
+    assert "Leaderboard — high effort" in html
 
 
 def test_expand_targets_dedups_labels():

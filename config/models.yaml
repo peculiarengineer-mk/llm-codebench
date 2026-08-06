@@ -28,22 +28,35 @@ models:
   # OpenRouter). Pricing shown is input / output USD per 1M tokens at time of
   # writing; the harness fetches live pricing at run time regardless.
 
+  # Each single-serving flagship is swept across reasoning levels so the
+  # leaderboard traces its cost/quality frontier (three rows: "<id> (low|medium|
+  # high)"). The GPT-5.6 tiers below are the exception — see the note there.
+
   # Anthropic — Claude Opus 4.8  ($5 / $25 per M)
   - id: anthropic/claude-opus-4.8
     price_override: null
+    efforts: [low, medium, high]
 
   # Anthropic — Claude Fable 5
   - id: anthropic/claude-fable-5
     price_override: null
+    efforts: [low, medium, high]
 
   # OpenAI — GPT-5.5  ($5 / $30 per M)
   - id: openai/gpt-5.5
     price_override: null
+    efforts: [low, medium, high]
 
   # OpenAI — GPT-5.6 tiers (no bare "gpt-5.6" id exists on OpenRouter; the series
   # ships as Luna/Terra/Sol. The -pro of each is the same model on a different
   # serving tier, so the plain ids are used here for a within-5.6 cost/quality
   # frontier). Prices are input / output USD per 1M tokens.
+  #
+  # These deliberately carry NO `efforts` sweep: the luna→terra→sol tiers already
+  # ARE the 5.6 cost/quality frontier, so crossing them with low/medium/high
+  # would multiply into nine rows conflating two axes (serving tier × reasoning
+  # effort). Sweep effort on ONE 5.6 tier via `--efforts` if that frontier is
+  # ever wanted.
   - id: openai/gpt-5.6-luna   # $1 / $6 — fast, cost-efficient
     price_override: null
   - id: openai/gpt-5.6-terra  # $2.50 / $15 — balanced
@@ -54,7 +67,9 @@ models:
   # Google — Gemini 3.1 Pro  ($2 / $12 per M)
   - id: google/gemini-3.1-pro-preview
     price_override: null
+    efforts: [low, medium, high]
 
   # xAI — Grok 4.5  ($2 / $6 per M)
   - id: x-ai/grok-4.5
     price_override: null
+    efforts: [low, medium, high]

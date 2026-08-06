@@ -28,7 +28,7 @@ from pathlib import Path
 from jinja2 import Template
 from markupsafe import Markup
 
-from bench.types import Attempt, ExecResult, ProblemResult, RunResult
+from bench.types import Attempt, ExecResult, ProblemResult, RunResult, parse_effort
 
 # --------------------------------------------------------------------------- #
 # Failure classification + statistics
@@ -40,28 +40,34 @@ FAILURE_LABELS = {
     "failed": "wrong answer",
     "timeout": "timeout",
     "no_code": "no code",
+    "filtered": "filtered",
     "api_error": "api error",
 }
-FAILURE_ORDER = ["pass", "failed", "timeout", "no_code", "api_error"]
+FAILURE_ORDER = ["pass", "failed", "timeout", "no_code", "filtered", "api_error"]
 
 _Z95 = 1.959963984540054  # z for a 95% two-sided normal interval
 
 
 def _classify(attempt: Attempt, ex: ExecResult) -> str:
-    """Bucket one attempt into pass / failed / timeout / no_code / api_error.
+    """Bucket one attempt into pass / failed / timeout / no_code / filtered / api_error.
 
     ``api_error`` is an attempt that failed at the API layer (e.g. HTTP 402
     out-of-credit) so the model was never sampled — kept distinct so a billing or
-    infra failure is never mistaken for the model producing no code. ``failed``
-    means the code ran but the hidden tests did not pass (wrong answer or a
-    runtime error) — not reliably distinguishable from an exit code alone, so
-    they share a bucket. ``no_code`` is the extractor finding no usable code
-    block in a reply the model actually returned.
+    infra failure is never mistaken for the model producing no code. ``filtered``
+    is a provider safety-filter block (``finish_reason == "content_filter"``): a
+    successful HTTP 200 with empty content, distinct from ``no_code`` so a refused
+    prompt is not read as the model being unable to write code. ``failed`` means
+    the code ran but the hidden tests did not pass (wrong answer or a runtime
+    error) — not reliably distinguishable from an exit code alone, so they share a
+    bucket. ``no_code`` is the extractor finding no usable code block in a reply
+    the model actually returned.
     """
     if ex.passed:
         return "pass"
     if attempt.error is not None:
         return "api_error"
+    if attempt.finish_reason == "content_filter":
+        return "filtered"
     if attempt.code is None:
         return "no_code"
     if ex.timed_out:
@@ -90,15 +96,30 @@ def _wilson(c: int, n: int, z: float = _Z95) -> tuple[float, float]:
 # --------------------------------------------------------------------------- #
 
 
-def _untested(pr: ProblemResult) -> bool:
-    """True if no attempt for this (model, problem) ever reached the model.
+def _unsampled(pr: ProblemResult) -> bool:
+    """True if no attempt for this (model, problem) was a genuine model sample.
 
-    Every attempt failed at the API layer (e.g. HTTP 402) or none were made, so
-    the pair was never sampled. Such problems are excluded from a model's
-    pass@k / solved / CI denominators — scoring them as 0 would penalize a model
-    for a billing/infra failure it isn't responsible for.
+    Every attempt failed at the API layer (e.g. HTTP 402), was blocked by a
+    provider content filter, or none were made — so the model never freely
+    answered. Such problems are excluded from a model's pass@k / solved / CI
+    denominators: scoring them as 0 would penalize the model for a billing/infra
+    failure or an over-eager filter it isn't responsible for.
     """
-    return not any(a.error is None for a in pr.attempts)
+    return not any(a.sampled for a in pr.attempts)
+
+
+# Back-compat alias: some callers/tests refer to the old name.
+_untested = _unsampled
+
+
+def _filtered_problem(pr: ProblemResult) -> bool:
+    """True if this (model, problem) was excluded specifically by a content filter.
+
+    An unsampled problem whose block came from the provider's safety filter (not a
+    billing/infra api-error), so it can be surfaced as "filtered" — distinct from
+    a genuinely untested (api-errored) problem.
+    """
+    return _unsampled(pr) and any(a.filtered for a in pr.attempts)
 
 
 def _model_rows(run: RunResult) -> list[dict]:
@@ -114,17 +135,20 @@ def _model_rows(run: RunResult) -> list[dict]:
 
     rows: list[dict] = []
     for model, results in by_model.items():
-        scored_results = [r for r in results if not _untested(r)]
+        scored_results = [r for r in results if not _unsampled(r)]
         scored = len(scored_results)
-        untested = len(results) - scored
+        # Split the excluded problems by reason: content-filter blocks are
+        # surfaced separately from genuinely untested (api-errored) problems.
+        filtered_problems = sum(1 for r in results if _filtered_problem(r))
+        untested = len(results) - scored - filtered_problems
 
-        ns = scored or 1  # avoid div-by-zero; a fully-untested model averages 0
+        ns = scored or 1  # avoid div-by-zero; a fully-unsampled model averages 0
         pass1 = sum(r.pass_at_1 for r in scored_results) / ns
         passk = sum(r.pass_at_k for r in scored_results) / ns
 
-        # Speed/token metrics count only attempts that reached the model; errored
-        # attempts carry latency 0 / tokens 0 and would skew the averages.
-        good = [a for r in results for a in r.attempts if a.error is None]
+        # Speed/token metrics count only genuine samples; errored/filtered
+        # attempts carry latency ~0 / tokens ~0 and would skew the averages.
+        good = [a for r in results for a in r.attempts if a.sampled]
         latencies = [a.latency_ms for a in good]
         ttfts = [a.ttft_ms for a in good if a.ttft_ms is not None]
         completion_tokens = sum(a.completion_tokens for a in good)
@@ -141,9 +165,9 @@ def _model_rows(run: RunResult) -> list[dict]:
         ci_low, ci_high = _wilson(solved, scored)  # _wilson(0, 0) -> (0, 0)
 
         # Low confidence: a scored problem sampled fewer than k times (some
-        # attempts errored), so k-clamping reports pass@<k> as pass@k.
+        # attempts errored or were filtered), so k-clamping reports pass@<k> as pass@k.
         low_conf = any(
-            sum(1 for a in r.attempts if a.error is None) < run.k
+            sum(1 for a in r.attempts if a.sampled) < run.k
             for r in scored_results
         )
 
@@ -164,6 +188,7 @@ def _model_rows(run: RunResult) -> list[dict]:
                 "problems": len(results),
                 "scored": scored,
                 "untested": untested,
+                "filtered_problems": filtered_problems,
                 "pass_at_1": pass1,
                 "pass_at_k": passk,
                 "ci_low": ci_low,
@@ -187,6 +212,48 @@ def _model_rows(run: RunResult) -> list[dict]:
     # must not top the board), then pass@k desc, then cost asc.
     rows.sort(key=lambda r: (0 if r["scored"] else 1, -r["pass_at_k"], r["cost_usd"]))
     return rows
+
+
+# The leaderboard is split into one section per reasoning-effort level so a
+# sweep reads as three comparable boards instead of one interleaved table.
+# ``None`` collects effort-less targets (e.g. serving-tier models) into a final
+# "default" section. Order is fixed low→medium→high→default.
+_EFFORT_SECTION_ORDER: tuple[str | None, ...] = ("low", "medium", "high", None)
+
+
+def _leaderboard_title(effort: str | None, *, sole: bool) -> str:
+    """Section heading for one effort group.
+
+    A run with a single section (no effort sweep, or ``--efforts`` pinned to one
+    level) keeps the plain "Leaderboard" heading; a multi-section run qualifies
+    each with its effort so the three boards are unambiguous.
+    """
+    if sole:
+        return "Leaderboard"
+    if effort is None:
+        return "Leaderboard — default (no effort)"
+    return f"Leaderboard — {effort} effort"
+
+
+def _grouped_model_rows(run: RunResult) -> list[dict]:
+    """Split :func:`_model_rows` into ordered per-effort leaderboard sections.
+
+    Groups the flat rows by the effort parsed from each target label, preserving
+    each row's within-section ranking and dropping empty sections. Returns a list
+    of ``{"effort", "title", "rows"}`` in low→medium→high→default order. A run
+    with no effort variants yields a single "default" section titled "Leaderboard".
+    """
+    rows = _model_rows(run)
+    by_effort: dict[str | None, list[dict]] = defaultdict(list)
+    for r in rows:
+        by_effort[parse_effort(r["model"])].append(r)
+
+    present = [e for e in _EFFORT_SECTION_ORDER if by_effort.get(e)]
+    sole = len(present) == 1
+    return [
+        {"effort": e, "title": _leaderboard_title(e, sole=sole), "rows": by_effort[e]}
+        for e in present
+    ]
 
 
 def _language_rows(run: RunResult) -> list[dict]:
@@ -407,21 +474,10 @@ def _methodology_line(run: RunResult) -> str:
     return "  ".join(bits)
 
 
-def render_cli(run: RunResult, console=None) -> None:
-    """Print a rich leaderboard + breakdowns to the terminal."""
-    from rich.console import Console
+def _leaderboard_table(rows: list[dict], run: RunResult, title: str):
+    """Build one rich leaderboard Table for a set of (already-ranked) rows."""
     from rich.table import Table
 
-    console = console or Console()
-    rows = _model_rows(run)
-
-    console.print(f"[dim]{_methodology_line(run)}[/dim]")
-    console.print(f"[bold]TL;DR[/bold] {_headline(run, rows)}\n")
-
-    title = (
-        f"llm-codebench — {run.problems_count} problems × {len(run.models)} models "
-        f"(k={run.k})"
-    )
     table = Table(title=title, title_style="bold")
     table.add_column("Model", style="cyan", no_wrap=True)
     table.add_column("pass@1", justify="right")
@@ -457,9 +513,40 @@ def render_cli(run: RunResult, console=None) -> None:
             _fmt_cost_per_correct(row["cost_per_correct"]),
             str(row["retries"]),
         )
-    console.print(table)
+    return table
+
+
+def render_cli(run: RunResult, console=None) -> None:
+    """Print a rich leaderboard + breakdowns to the terminal."""
+    from rich.console import Console
+    from rich.table import Table
+
+    console = console or Console()
+    rows = _model_rows(run)
+    sections = _grouped_model_rows(run)
+
+    console.print(f"[dim]{_methodology_line(run)}[/dim]")
+    console.print(f"[bold]TL;DR[/bold] {_headline(run, rows)}\n")
+
+    # One leaderboard per effort level (low/medium/high, then any effort-less
+    # models) so a reasoning-effort sweep reads as comparable boards.
+    console.print(
+        f"[bold]llm-codebench[/bold] — {run.problems_count} problems × "
+        f"{len(run.models)} models (k={run.k})"
+    )
+    for section in sections:
+        console.print(_leaderboard_table(section["rows"], run, section["title"]))
+
     if run.aborted_reason:
         console.print(f"[red]⚠ {run.aborted_reason}[/red]")
+    if any(r["filtered_problems"] for r in rows):
+        notes = ", ".join(
+            f"{r['model']} ({r['filtered_problems']})"
+            for r in rows if r["filtered_problems"]
+        )
+        console.print("[yellow]⚠ filtered problems excluded from scoring "
+                      "(provider content filter blocked the prompt — the model "
+                      f"never got to answer): {notes}[/yellow]")
     if any(r["untested"] for r in rows):
         notes = ", ".join(
             f"{r['model']} ({r['untested']})" for r in rows if r["untested"]
@@ -468,7 +555,7 @@ def render_cli(run: RunResult, console=None) -> None:
                       f"(all attempts API-errored): {notes}[/yellow]")
     if any(r["low_conf"] for r in rows):
         console.print("[dim]† some problems were sampled fewer than k times "
-                      "(API errors); their pass@k is lower-confidence.[/dim]")
+                      "(API errors or filtered); their pass@k is lower-confidence.[/dim]")
     if any(r["config_priced"] for r in rows):
         console.print("[dim]* cost priced from a config override, not live API "
                       "pricing.[/dim]")
@@ -549,6 +636,7 @@ _HTML_TEMPLATE = Template(
          padding: 0 1rem; }
   h1 { font-size: 1.5rem; margin-bottom:.25rem; }
   h2 { font-size: 1.15rem; margin-top: 2.25rem; }
+  h3 { font-size: 1rem; margin: 1.5rem 0 .25rem; color: var(--muted); }
   table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
   th, td { padding: .5rem .75rem; text-align: right; border-bottom: 1px solid var(--line); }
   th:first-child, td:first-child { text-align: left; }
@@ -587,6 +675,9 @@ _HTML_TEMPLATE = Template(
   {% if run.aborted_reason %}<div class="warn"><strong>⚠ Run did not complete</strong> —
      {{ run.aborted_reason }} Rows below cover only what ran; untested problems are
      excluded from scoring.</div>{% endif %}
+  {% if filtered_note %}<div class="warn"><strong>⚠ Filtered problems excluded</strong> —
+     a provider content filter blocked the prompt (the model never got to answer),
+     so these are excluded from pass@k for: {{ filtered_note }}.</div>{% endif %}
   {% if untested_note %}<div class="warn"><strong>⚠ Untested problems excluded</strong> —
      all attempts API-errored (never sampled) for: {{ untested_note }}.</div>{% endif %}
   <p class="meta">total cost
@@ -595,13 +686,15 @@ _HTML_TEMPLATE = Template(
      total retries <strong>{{ run.total_retries }}</strong></p>
 
   <h2>Leaderboard</h2>
-  <table id="leaderboard">
+  {% for section in sections %}
+  {% if sections|length > 1 %}<h3>{{ section.title }}</h3>{% endif %}
+  <table class="leaderboard">
     <thead><tr>
       <th>Model</th><th>pass@1</th><th>pass@{{ run.k }}</th><th>solved</th>
       <th>tok/s</th><th>avg TTFT</th><th>cost</th><th>$/correct</th><th>retries</th>
     </tr></thead>
     <tbody>
-    {% for r in rows %}
+    {% for r in section.rows %}
       <tr>
         <td>{{ r.model }}</td>
         {% if r.scored == 0 %}
@@ -629,6 +722,7 @@ _HTML_TEMPLATE = Template(
     {% endfor %}
     </tbody>
   </table>
+  {% endfor %}
   {% if any_config_priced %}<p class="meta">* cost priced from a config override,
      not live API pricing.</p>{% endif %}
 
@@ -695,8 +789,9 @@ _HTML_TEMPLATE = Template(
 
   <footer>Generated by llm-codebench{% if run.generated_at %} at {{ run.generated_at }}{% endif %}.
      pass@k uses the unbiased Chen et&nbsp;al. (2021) estimator; intervals are 95% Wilson
-     score on solved/scored (problems where every attempt hit an API error are
-     excluded as untested).</footer>
+     score on solved/scored. Problems the model never freely answered — every attempt
+     hit an API error (untested) or was blocked by a provider content filter
+     (filtered) — are excluded from pass@k rather than scored as failures.</footer>
 
 <script>
 // Lightweight click-to-sort for every data table. No external deps.
@@ -735,9 +830,14 @@ def render_html(run: RunResult, out_path: str | Path) -> Path:
     untested_note = ", ".join(
         f"{r['model']} ({r['untested']})" for r in rows if r["untested"]
     )
+    filtered_note = ", ".join(
+        f"{r['model']} ({r['filtered_problems']})"
+        for r in rows if r["filtered_problems"]
+    )
     html = _HTML_TEMPLATE.render(
         run=run,
         rows=rows,
+        sections=_grouped_model_rows(run),
         lang_rows=_language_rows(run),
         difficulties=difficulties,
         diff_rows=diff_rows,
@@ -746,6 +846,7 @@ def render_html(run: RunResult, out_path: str | Path) -> Path:
         methodology=_methodology_line(run),
         headline=_headline(run, rows),
         untested_note=untested_note,
+        filtered_note=filtered_note,
         scatter=Markup(_scatter_svg(rows)),
         failure_order=FAILURE_ORDER,
         failure_labels=FAILURE_LABELS,
@@ -770,15 +871,23 @@ def export_raw(run: RunResult, out_dir: str | Path) -> tuple[Path, Path]:
         writer.writerow(
             ["model", "problem_slug", "language", "difficulty", "pass_at_1",
              "pass_at_k", "attempts", "passed_attempts", "timeouts", "no_code",
-             "api_errors", "total_cost_usd", "avg_latency_ms", "retries"]
+             "filtered", "api_errors", "total_cost_usd", "avg_latency_ms", "retries"]
         )
         for pr in run.results:
             passed = sum(1 for e in pr.exec_results if e.passed)
             timeouts = sum(1 for e in pr.exec_results if e.timed_out)
             api_errors = sum(1 for a in pr.attempts if a.error is not None)
-            # no_code = model returned a reply with no usable code (never-ran
-            # api_error attempts also have code=None, so exclude them here).
-            no_code = sum(1 for a in pr.attempts if a.code is None and a.error is None)
+            # filtered = provider safety-filter block (empty 200); kept out of the
+            # no_code tally so a refusal isn't read as the model omitting code.
+            filtered = sum(1 for a in pr.attempts if a.finish_reason == "content_filter")
+            # no_code = model returned a reply with no usable code. never-ran
+            # api_error attempts and filtered blocks also have code=None, so
+            # exclude both here.
+            no_code = sum(
+                1 for a in pr.attempts
+                if a.code is None and a.error is None
+                and a.finish_reason != "content_filter"
+            )
             cost = sum(a.cost_usd for a in pr.attempts)
             latencies = [a.latency_ms for a in pr.attempts]
             retries = sum(a.retries for a in pr.attempts)
@@ -794,6 +903,7 @@ def export_raw(run: RunResult, out_dir: str | Path) -> tuple[Path, Path]:
                     passed,
                     timeouts,
                     no_code,
+                    filtered,
                     api_errors,
                     f"{cost:.6f}",
                     f"{(sum(latencies) / len(latencies)) if latencies else 0.0:.1f}",

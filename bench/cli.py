@@ -28,9 +28,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--models", help="comma-separated OpenRouter model ids "
                    "(default: every id in config/models.yaml)")
-    p.add_argument("--efforts", help="comma-separated reasoning-effort levels "
-                   "(low,medium,high) to sweep every selected model across; "
-                   "overrides per-entry 'efforts' in config/models.yaml")
+    p.add_argument("--efforts", help="reasoning-effort level(s) to run, "
+                   "comma-separated (e.g. 'high' or 'low,high'); each becomes its "
+                   "own leaderboard section. Omit to run all levels configured per "
+                   "model in config/models.yaml (the default: low, medium and high). "
+                   "When given, overrides those per-entry lists for every model.")
     p.add_argument("--langs", help="comma-separated languages to run "
                    "(python,csharp,typescript,bash); default: all")
     p.add_argument("--k", type=int, help=f"attempts per problem (default {cfg.DEFAULT_K})")

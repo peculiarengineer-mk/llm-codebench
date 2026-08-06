@@ -33,7 +33,10 @@ DEFAULT_MODELS_YAML = PROJECT_ROOT / "config" / "models.yaml"
 DEFAULT_K = 3
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_TIMEOUT = 10.0
-DEFAULT_MAX_SPEND_USD = 5.0
+# Sized to clear a full default-roster run (all models × low/medium/high ≈ $135
+# at current prices) with headroom. Still a hard ceiling the SpendGuard enforces;
+# lower it with --max-spend for a cheap smoke run.
+DEFAULT_MAX_SPEND_USD = 150.0
 DEFAULT_PROMPT_STYLE = "strict"
 
 _API_KEY_ENV = "OPENROUTER_API_KEY"

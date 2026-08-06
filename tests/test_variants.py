@@ -282,6 +282,52 @@ def test_api_error_classified_distinctly_from_no_code():
     assert _classify(no_code, fail_ex) == "no_code"
 
 
+def test_content_filter_classified_as_filtered_not_no_code():
+    """A provider safety-filter block (empty 200) is 'filtered', not 'no code'."""
+    from bench.report import _classify
+    from bench.types import ExecResult
+
+    fail_ex = ExecResult(passed=False, stdout="", stderr="x", exit_code=-1,
+                         duration_ms=0.0, timed_out=False)
+    # Empty content + finish_reason=content_filter, no api-layer error.
+    filtered = Attempt(code=None, latency_ms=1.0, ttft_ms=None, prompt_tokens=5,
+                       completion_tokens=1, cost_usd=0.0, price_source="api",
+                       raw_response="", error=None, finish_reason="content_filter")
+    assert _classify(filtered, fail_ex) == "filtered"
+    # Same empty reply but a normal stop reason stays 'no code'.
+    plain = filtered.model_copy(update={"finish_reason": "stop"})
+    assert _classify(plain, fail_ex) == "no_code"
+
+
+@pytest.mark.asyncio
+async def test_stream_captures_content_filter_finish_reason():
+    """The client records finish_reason so a filtered reply is diagnosable."""
+    captured = {}
+
+    body = _sse(
+        '{"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}',
+        '{"choices":[{"delta":{},"finish_reason":"content_filter"}]}',
+        '{"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":1}}',
+        "[DONE]",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, content=body)
+
+    client = OpenRouterClient("k")
+    client._client = httpx.AsyncClient(
+        base_url="https://openrouter.ai/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    client._price_overrides = {}
+    client._pricing_cache = {"m": ModelPricing(0.0, 0.0, "api")}
+    async with client:
+        attempt = await client.complete("m", "p", 0.0, effort="medium")
+    assert attempt.finish_reason == "content_filter"
+    assert attempt.raw_response == ""  # blocked: no content
+
+
 def test_errored_attempts_excluded_so_one_real_pass_counts(monkeypatch):
     """One real passing attempt among 402s => problem solved (errors ignored)."""
     from bench import runner as R

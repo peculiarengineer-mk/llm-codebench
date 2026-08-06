@@ -148,6 +148,23 @@ def target_label(model_id: str, effort: str | None) -> str:
     return model_id if effort is None else f"{model_id} ({effort})"
 
 
+def parse_effort(label: str) -> str | None:
+    """Recover the effort level from a target label — the inverse of
+    :func:`target_label`.
+
+    Returns the effort (one of :data:`VALID_EFFORTS`) when ``label`` ends with a
+    recognized ``" (<effort>)"`` suffix, else ``None`` (an effort-less target).
+    Only known effort suffixes match, so a model id that merely happens to end in
+    parentheses is not mistaken for an effort variant. Used by the reporter to
+    group the leaderboard into per-effort sections without threading the run's
+    targets through :class:`RunResult`.
+    """
+    for effort in VALID_EFFORTS:
+        if label.endswith(f" ({effort})"):
+            return effort
+    return None
+
+
 class Language(str, Enum):
     """Languages the harness can benchmark."""
 
@@ -244,6 +261,30 @@ class Attempt(_Frozen):
     # as an "api error" — distinct from a model emitting no code — and excluded
     # from pass@k so a billing/infra failure never scores as a wrong answer.
     error: str | None = None
+    # The stream's terminal ``finish_reason`` (e.g. "stop", "length",
+    # "content_filter"). Captured so a provider safety-filter block — which comes
+    # back as a successful HTTP 200 with empty content — is classified as
+    # "filtered" rather than masquerading as the model emitting no code.
+    finish_reason: str | None = None
+
+    @property
+    def filtered(self) -> bool:
+        """True if a provider safety filter blocked this reply (empty 200)."""
+        return self.finish_reason == "content_filter"
+
+    @property
+    def sampled(self) -> bool:
+        """True if this is a genuine model sample — the API call succeeded and the
+        provider did not block the reply.
+
+        The single test for "did the model actually get to answer this?". An
+        ``api_error`` attempt (never reached the model) and a ``filtered`` attempt
+        (the provider refused before the model answered) are both *not* samples,
+        so both are excluded from pass@k: a model is scored only on prompts it was
+        genuinely allowed to attempt, never penalized for a billing/infra failure
+        or an over-eager content filter.
+        """
+        return self.error is None and not self.filtered
 
 
 class ExecResult(_Frozen):
@@ -315,6 +356,7 @@ __all__ = [
     "Effort",
     "VALID_EFFORTS",
     "target_label",
+    "parse_effort",
     "Problem",
     "RunConfig",
     "RunTarget",

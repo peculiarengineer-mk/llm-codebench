@@ -92,14 +92,21 @@ Common flags: `--models`, `--efforts`, `--langs`, `--k`, `--temp`, `--timeout`,
 The same model can be benchmarked across reasoning-effort levels to trace its
 cost-vs-quality curve. Each level becomes its own leaderboard row, labelled
 `<model> (<effort>)`, and effort is sent via OpenRouter's unified
-`reasoning.effort` param (mapped per provider; non-reasoning models ignore it):
+`reasoning.effort` param (mapped per provider; non-reasoning models ignore it).
+The report then **splits the leaderboard into one section per level** — a *low*,
+*medium*, and *high* board (plus a *default* board for any effort-less model),
+so the three efforts read as comparable tables rather than one interleaved list.
+
+By default every reasoning-capable model in `config/models.yaml` is swept across
+all three levels. Select a subset with `--efforts`; omit it to run them all:
 
 ```bash
-# Sweep one model across all three levels
-llm-codebench --models anthropic/claude-opus-4.8 --efforts low,medium,high --dry-run
+llm-codebench --efforts high            # just the high-effort board
+llm-codebench --efforts low,high        # low and high
+llm-codebench                           # all three levels (the default)
 ```
 
-Or pin levels per model in `config/models.yaml` with an `efforts:` fan-out:
+Pin levels per model in `config/models.yaml` with an `efforts:` fan-out:
 
 ```yaml
 - id: anthropic/claude-opus-4.8
@@ -107,6 +114,10 @@ Or pin levels per model in `config/models.yaml` with an `efforts:` fan-out:
 ```
 
 A run-wide `--efforts` overrides the per-entry lists for every selected model.
+Because sweeping every model triples the target count, watch the estimate:
+`--dry-run` prices the full roster (≈$135 at current prices), and `--max-spend`
+caps it. The default cap is sized to clear a full run; lower it for a cheap
+smoke test, or narrow the run with `--models`/`--efforts`/`--filter`.
 
 ## Configuration
 
