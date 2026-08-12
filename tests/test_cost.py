@@ -80,3 +80,56 @@ def test_spend_guard_concurrent_records():
         assert guard.spent == pytest.approx(100.0)
 
     asyncio.run(run())
+
+
+def test_every_valid_effort_has_a_reasoning_estimate():
+    """Guard the enum↔heuristic coupling that under-priced xhigh/max.
+
+    `estimate_run` used `REASONING_TOKENS.get(effort, 0)`, so a level present in
+    VALID_EFFORTS but absent here silently estimated ZERO reasoning tokens —
+    making the deepest targets look cheaper than low effort, the one direction a
+    spend cap must never be wrong in. bench.cost now raises at import instead;
+    this pins that the two stay in sync.
+    """
+    from bench.cost import REASONING_TOKENS
+    from bench.types import VALID_EFFORTS
+
+    assert set(REASONING_TOKENS) == set(VALID_EFFORTS)
+
+
+def test_reasoning_estimates_increase_with_effort():
+    """Deeper effort must never estimate cheaper than a shallower one."""
+    from bench.cost import REASONING_TOKENS
+    from bench.types import VALID_EFFORTS
+
+    ladder = [REASONING_TOKENS[e] for e in VALID_EFFORTS]
+    assert ladder == sorted(ladder)
+    assert len(set(ladder)) == len(ladder)  # strictly increasing, no ties
+
+
+def test_estimated_cost_rises_monotonically_across_the_ladder():
+    """End-to-end through estimate_run: the priced ladder is ordered.
+
+    This is the regression for the observed bug — a full-roster --dry-run showed
+    `(xhigh)` and `(max)` pricing *below* `(low)` because both fell through to the
+    no-reasoning baseline.
+    """
+    from bench.config import expand_targets
+    from bench.types import VALID_EFFORTS, ModelSpec
+
+    problems = [_problem("a", 100)]
+    targets = expand_targets([ModelSpec(id="m", efforts=list(VALID_EFFORTS))])
+    config = _config(["m"], k=1)
+    config = config.model_copy(update={"targets": targets})
+    est = estimate_run(config, problems, {"m": ModelPricing(0.001, 0.002, "api")})
+
+    costs = [row.est_cost_usd for row in est.per_model]
+    assert len(costs) == len(VALID_EFFORTS)
+    assert costs == sorted(costs)
+    # the effort-less baseline must be cheapest of all
+    base = estimate_run(
+        config.model_copy(update={"targets": expand_targets([ModelSpec(id="m")])}),
+        problems,
+        {"m": ModelPricing(0.001, 0.002, "api")},
+    )
+    assert base.per_model[0].est_cost_usd < costs[0]

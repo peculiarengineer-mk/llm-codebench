@@ -134,8 +134,22 @@ from pydantic import BaseModel, Field
 # Reasoning-effort levels accepted by OpenRouter's unified ``reasoning.effort``
 # param (mapped per-provider: Anthropic thinking budget, OpenAI reasoning effort,
 # etc.). ``None`` means "send no reasoning field" — the model's own default.
-Effort = Literal["low", "medium", "high"]
-VALID_EFFORTS: tuple[str, ...] = ("low", "medium", "high")
+#
+# This tuple is the harness VOCABULARY, not a per-model capability claim: support
+# varies by model, and OpenRouter publishes the real list per entry as
+# `reasoning.supported_efforts` on /api/v1/models. Verified there at time of
+# writing: claude-opus-5 takes all five; kimi-k3 takes only low/high/max (no
+# medium, no xhigh); qwen3.8-max takes low..xhigh but not max. So a level being
+# in VALID_EFFORTS does NOT mean every model accepts it — the per-entry `efforts`
+# list in config/models.yaml is the real constraint, and each roster entry there
+# carries only levels its model actually supports.
+#
+# Ordered cheapest→deepest; the reporter reuses that order for its leaderboard
+# sections. OpenRouter also exposes "minimal" (qwen) and "none" (gpt-5.6), which
+# are deliberately NOT included — they mean "barely think" / "don't think", which
+# is what an effort-less target already measures.
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+VALID_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
 
 def target_label(model_id: str, effort: str | None) -> str:
@@ -154,8 +168,12 @@ def parse_effort(label: str) -> str | None:
 
     Returns the effort (one of :data:`VALID_EFFORTS`) when ``label`` ends with a
     recognized ``" (<effort>)"`` suffix, else ``None`` (an effort-less target).
-    Only known effort suffixes match, so a model id that merely happens to end in
-    parentheses is not mistaken for an effort variant. Used by the reporter to
+    The guarantee is only that the three :data:`VALID_EFFORTS` suffixes match;
+    a model id ending in parentheses for another reason (e.g. ``"m (2025)"``)
+    parses as effort-less, but this function cannot distinguish
+    ``target_label("m (high)", None)`` from ``target_label("m", "high")`` — both
+    are ``"m (high)"`` and parse as effort ``"high"``. The collision is
+    theoretical: OpenRouter model ids contain no spaces. Used by the reporter to
     group the leaderboard into per-effort sections without threading the run's
     targets through :class:`RunResult`.
     """
@@ -269,20 +287,29 @@ class Attempt(_Frozen):
 
     @property
     def filtered(self) -> bool:
-        """True if a provider safety filter blocked this reply (empty 200)."""
-        return self.finish_reason == "content_filter"
+        """True if a provider safety filter blocked this reply *and* left no
+        usable output (``finish_reason == "content_filter"`` and no code).
+
+        ``code`` is populated post-hoc by the runner after extraction, so this
+        property is only meaningful once extraction has run. A filter trip that
+        still streamed a complete code block is *not* filtered here — the
+        attempt carries runnable code and is scored normally.
+        """
+        return self.finish_reason == "content_filter" and self.code is None
 
     @property
     def sampled(self) -> bool:
         """True if this is a genuine model sample — the API call succeeded and the
-        provider did not block the reply.
+        provider did not block the reply before any usable output.
 
         The single test for "did the model actually get to answer this?". An
         ``api_error`` attempt (never reached the model) and a ``filtered`` attempt
         (the provider refused before the model answered) are both *not* samples,
         so both are excluded from pass@k: a model is scored only on prompts it was
         genuinely allowed to attempt, never penalized for a billing/infra failure
-        or an over-eager content filter.
+        or an over-eager content filter. A provider that streams a complete code
+        fence and *then* trips the filter produced a genuine sample — it yielded
+        runnable code, so it is scored normally.
         """
         return self.error is None and not self.filtered
 
@@ -344,6 +371,11 @@ class ModelSpec(_Frozen):
     optional fan-out list of reasoning-effort levels: one entry with
     ``efforts: [low, medium, high]`` expands into three benchmark targets sharing
     the same model id. Absent/empty ``efforts`` means a single effort-less target.
+
+    Levels are validated against :data:`VALID_EFFORTS`, which is the harness
+    vocabulary rather than a per-model capability claim — see the note there.
+    A level this particular model does not support passes that check and fails at
+    the provider, so the roster's per-entry lists carry only supported levels.
     """
 
     id: str

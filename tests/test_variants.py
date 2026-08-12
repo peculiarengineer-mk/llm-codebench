@@ -299,6 +299,26 @@ def test_content_filter_classified_as_filtered_not_no_code():
     assert _classify(plain, fail_ex) == "no_code"
 
 
+def test_filter_trip_with_usable_code_scores_normally():
+    """Regression guard (finding #1): a filter trip that still streamed a full
+    code fence is a genuine sample — classify on execution, not the flag."""
+    from bench.report import _classify
+    from bench.types import ExecResult
+
+    ok_ex = ExecResult(passed=True, stdout="", stderr="", exit_code=0,
+                       duration_ms=1.0, timed_out=False)
+    att = Attempt(code="print('hi')", latency_ms=1.0, ttft_ms=1.0,
+                  prompt_tokens=5, completion_tokens=10, cost_usd=0.0,
+                  price_source="api", raw_response="```python\nprint('hi')\n```",
+                  error=None, finish_reason="content_filter")
+    # Pre-narrowing `filtered` was finish_reason alone, so a filtered attempt
+    # carrying passing code was excluded from pass@k: the first two assertions
+    # fail under that contract.
+    assert not att.filtered
+    assert att.sampled
+    assert _classify(att, ok_ex) == "pass"
+
+
 @pytest.mark.asyncio
 async def test_stream_captures_content_filter_finish_reason():
     """The client records finish_reason so a filtered reply is diagnosable."""
@@ -361,3 +381,99 @@ def test_errored_attempts_excluded_so_one_real_pass_counts(monkeypatch):
     pr = run.results[0]
     assert pr.pass_at_k == 1.0  # single real sample passed; the two 402s ignored
     assert sum(1 for a in pr.attempts if a.error is not None) == 2
+
+
+def test_filtered_attempt_excluded_from_passk_and_stderr_wired(monkeypatch):
+    """End-to-end: a filter block with no code is excluded from pass@k, and the
+    runner writes the finish_reason=content_filter stderr for the drill-down."""
+    from bench import runner as R
+
+    calls = {"n": 0}
+
+    class PartlyFilteredClient:
+        async def complete(self, *a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:  # provider blocks the first reply outright
+                return Attempt(
+                    code=None, latency_ms=1.0, ttft_ms=None, prompt_tokens=5,
+                    completion_tokens=1, cost_usd=0.0, price_source="api",
+                    raw_response="", finish_reason="content_filter",
+                )
+            # the remaining attempts reach the model — one right, one wrong
+            return Attempt(
+                code=None, latency_ms=1.0, ttft_ms=1.0, prompt_tokens=5,
+                completion_tokens=5, cost_usd=0.0, price_source="api",
+                raw_response="pass" if calls["n"] == 2 else "fail",
+            )
+
+    async def fake_sandbox(*a, **kw):
+        passed = a[1] == "pass"  # a[1] is the extracted code
+        return ExecResult(passed=passed, stdout="", stderr="",
+                          exit_code=0 if passed else 1,
+                          duration_ms=1.0, timed_out=False)
+
+    monkeypatch.setattr(R, "extract_code", lambda raw, lang: raw or None)
+    monkeypatch.setattr(R, "run_in_sandbox", fake_sandbox)
+
+    cfg = RunConfig(
+        models=["m"], k=3, temperature=0.7, timeout=10.0, max_spend_usd=5.0,
+        dry_run=False, prompt_style="strict",
+        targets=expand_targets([ModelSpec(id="m")]),
+    )
+    run = asyncio.run(run_benchmark(cfg, [_problem()], PartlyFilteredClient()))
+    pr = run.results[0]
+    # The block is not a sample: scoring runs over the 2 genuine samples, so
+    # pass@1 is 1/2 — it would be 1/3 if the filtered attempt were counted.
+    assert [a.sampled for a in pr.attempts] == [False, True, True]
+    assert pr.attempts[0].filtered
+    assert pr.pass_at_1 == 0.5
+    assert pr.pass_at_k == 1.0
+    # And the drill-down stderr says why the first attempt produced no code.
+    assert "finish_reason=content_filter" in pr.exec_results[0].stderr
+
+
+def test_effort_labels_round_trip_across_the_full_ladder():
+    """target_label/parse_effort agree on all five levels.
+
+    `xhigh` ends with the string `high`, so a suffix matcher could mis-parse
+    "m (xhigh)" as effort "high" and file it under the wrong leaderboard board.
+    The leading space in " (high)" is what prevents that — pin it.
+    """
+    from bench.types import VALID_EFFORTS, parse_effort, target_label
+
+    for effort in VALID_EFFORTS:
+        label = target_label("anthropic/claude-opus-5", effort)
+        assert parse_effort(label) == effort, label
+    assert parse_effort(target_label("m", None)) is None
+    assert parse_effort("vendor/m (2025)") is None
+
+
+def test_expand_targets_supports_deep_effort_levels():
+    """A roster entry may sweep xhigh/max, and each becomes its own target."""
+    from bench.types import ModelSpec
+
+    targets = expand_targets([ModelSpec(id="m", efforts=["high", "xhigh", "max"])])
+    assert [t.label for t in targets] == ["m (high)", "m (xhigh)", "m (max)"]
+    assert [t.effort for t in targets] == ["high", "xhigh", "max"]
+
+
+def test_roster_entries_only_declare_efforts_their_model_supports():
+    """The shipped roster must not configure a level the provider rejects.
+
+    OpenRouter publishes `reasoning.supported_efforts` per model; these three
+    entries have gapped ladders (kimi-k3 has no medium/xhigh, qwen3.8-max has no
+    max), and a level outside them passes local validation then fails at the
+    provider mid-run.
+    """
+    from bench.config import load_model_specs
+
+    supported = {
+        "anthropic/claude-opus-5": {"low", "medium", "high", "xhigh", "max"},
+        "moonshotai/kimi-k3": {"low", "high", "max"},
+        "qwen/qwen3.8-max": {"low", "medium", "high", "xhigh", "minimal"},
+    }
+    by_id = {s.id: s for s in load_model_specs()}
+    for model_id, allowed in supported.items():
+        spec = by_id.get(model_id)
+        assert spec is not None, f"{model_id} missing from config/models.yaml"
+        assert set(spec.efforts or []) <= allowed, model_id

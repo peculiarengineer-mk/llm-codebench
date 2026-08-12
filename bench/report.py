@@ -54,9 +54,11 @@ def _classify(attempt: Attempt, ex: ExecResult) -> str:
     ``api_error`` is an attempt that failed at the API layer (e.g. HTTP 402
     out-of-credit) so the model was never sampled — kept distinct so a billing or
     infra failure is never mistaken for the model producing no code. ``filtered``
-    is a provider safety-filter block (``finish_reason == "content_filter"``): a
-    successful HTTP 200 with empty content, distinct from ``no_code`` so a refused
-    prompt is not read as the model being unable to write code. ``failed`` means
+    is a provider safety-filter block that left no usable code (see
+    :attr:`Attempt.filtered`): a successful HTTP 200 with empty content, distinct
+    from ``no_code`` so a refused prompt is not read as the model being unable to
+    write code. A partial-content filter block that still carried usable code is
+    classified on its execution result, not as ``filtered``. ``failed`` means
     the code ran but the hidden tests did not pass (wrong answer or a runtime
     error) — not reliably distinguishable from an exit code alone, so they share a
     bucket. ``no_code`` is the extractor finding no usable code block in a reply
@@ -66,7 +68,7 @@ def _classify(attempt: Attempt, ex: ExecResult) -> str:
         return "pass"
     if attempt.error is not None:
         return "api_error"
-    if attempt.finish_reason == "content_filter":
+    if attempt.filtered:
         return "filtered"
     if attempt.code is None:
         return "no_code"
@@ -113,13 +115,18 @@ _untested = _unsampled
 
 
 def _filtered_problem(pr: ProblemResult) -> bool:
-    """True if this (model, problem) was excluded specifically by a content filter.
+    """True if this (model, problem) was excluded with filter blocks in the lead.
 
-    An unsampled problem whose block came from the provider's safety filter (not a
-    billing/infra api-error), so it can be surfaced as "filtered" — distinct from
-    a genuinely untested (api-errored) problem.
+    Attributes an unsampled problem by the majority of its unsampled attempts:
+    filter blocks vs api-errors, ties going to ``filtered``. A mixed problem that
+    was mostly api-errored reports as untested, so the banner doesn't blame the
+    provider's safety filter for what may be mostly a billing failure.
     """
-    return _unsampled(pr) and any(a.filtered for a in pr.attempts)
+    if not _unsampled(pr):
+        return False
+    unsampled = [a for a in pr.attempts if not a.sampled]
+    blocks = sum(1 for a in unsampled if a.filtered)
+    return blocks > 0 and blocks >= len(unsampled) - blocks
 
 
 def _model_rows(run: RunResult) -> list[dict]:
@@ -215,10 +222,14 @@ def _model_rows(run: RunResult) -> list[dict]:
 
 
 # The leaderboard is split into one section per reasoning-effort level so a
-# sweep reads as three comparable boards instead of one interleaved table.
+# sweep reads as comparable boards instead of one interleaved table.
 # ``None`` collects effort-less targets (e.g. serving-tier models) into a final
-# "default" section. Order is fixed low→medium→high→default.
-_EFFORT_SECTION_ORDER: tuple[str | None, ...] = ("low", "medium", "high", None)
+# "default" section. Order is fixed cheapest→deepest→default, matching
+# :data:`~bench.types.VALID_EFFORTS`; a level no target used is skipped, so a
+# low/high-only run renders two boards rather than empty xhigh/max ones.
+_EFFORT_SECTION_ORDER: tuple[str | None, ...] = (
+    "low", "medium", "high", "xhigh", "max", None,
+)
 
 
 def _leaderboard_title(effort: str | None, *, sole: bool) -> str:
@@ -552,7 +563,8 @@ def render_cli(run: RunResult, console=None) -> None:
             f"{r['model']} ({r['untested']})" for r in rows if r["untested"]
         )
         console.print("[yellow]⚠ untested problems excluded from scoring "
-                      f"(all attempts API-errored): {notes}[/yellow]")
+                      f"(API errors outnumbered content-filter blocks — the "
+                      f"model was mostly never sampled): {notes}[/yellow]")
     if any(r["low_conf"] for r in rows):
         console.print("[dim]† some problems were sampled fewer than k times "
                       "(API errors or filtered); their pass@k is lower-confidence.[/dim]")
@@ -679,7 +691,7 @@ _HTML_TEMPLATE = Template(
      a provider content filter blocked the prompt (the model never got to answer),
      so these are excluded from pass@k for: {{ filtered_note }}.</div>{% endif %}
   {% if untested_note %}<div class="warn"><strong>⚠ Untested problems excluded</strong> —
-     all attempts API-errored (never sampled) for: {{ untested_note }}.</div>{% endif %}
+     attempts mostly API-errored (never sampled) for: {{ untested_note }}.</div>{% endif %}
   <p class="meta">total cost
      <strong>${{ '%.4f'|format(run.total_cost_usd) }}</strong> &middot;
      wall time {{ '%.1f'|format((run.wall_time_ms if run.wall_time_ms is not none else run.total_latency_ms) / 1000) }}s &middot;
@@ -699,7 +711,7 @@ _HTML_TEMPLATE = Template(
         <td>{{ r.model }}</td>
         {% if r.scored == 0 %}
         <td data-sort="-1">&mdash;</td>
-        <td data-sort="-1">&mdash; <span class="ci">(untested)</span></td>
+        <td data-sort="-1">&mdash; <span class="ci">({% if r.filtered_problems and r.untested %}excluded{% elif r.filtered_problems %}filtered{% else %}untested{% endif %})</span></td>
         <td data-sort="-1">&mdash;</td>
         {% else %}
         <td class="bar" data-sort="{{ r.pass_at_1 }}">
@@ -789,8 +801,8 @@ _HTML_TEMPLATE = Template(
 
   <footer>Generated by llm-codebench{% if run.generated_at %} at {{ run.generated_at }}{% endif %}.
      pass@k uses the unbiased Chen et&nbsp;al. (2021) estimator; intervals are 95% Wilson
-     score on solved/scored. Problems the model never freely answered — every attempt
-     hit an API error (untested) or was blocked by a provider content filter
+     score on solved/scored. Problems the model never freely answered — mostly
+     API-errored attempts (untested) or mostly provider content-filter blocks
      (filtered) — are excluded from pass@k rather than scored as failures.</footer>
 
 <script>
@@ -877,16 +889,16 @@ def export_raw(run: RunResult, out_dir: str | Path) -> tuple[Path, Path]:
             passed = sum(1 for e in pr.exec_results if e.passed)
             timeouts = sum(1 for e in pr.exec_results if e.timed_out)
             api_errors = sum(1 for a in pr.attempts if a.error is not None)
-            # filtered = provider safety-filter block (empty 200); kept out of the
-            # no_code tally so a refusal isn't read as the model omitting code.
-            filtered = sum(1 for a in pr.attempts if a.finish_reason == "content_filter")
+            # filtered = provider safety-filter block that left no usable code
+            # (Attempt.filtered); kept out of the no_code tally so a refusal
+            # isn't read as the model omitting code.
+            filtered = sum(1 for a in pr.attempts if a.filtered)
             # no_code = model returned a reply with no usable code. never-ran
             # api_error attempts and filtered blocks also have code=None, so
             # exclude both here.
             no_code = sum(
                 1 for a in pr.attempts
-                if a.code is None and a.error is None
-                and a.finish_reason != "content_filter"
+                if a.code is None and a.error is None and not a.filtered
             )
             cost = sum(a.cost_usd for a in pr.attempts)
             latencies = [a.latency_ms for a in pr.attempts]

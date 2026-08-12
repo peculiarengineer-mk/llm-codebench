@@ -111,6 +111,7 @@ def test_filtered_problem_excluded_from_passk_and_tracked_separately():
     assert row["filtered_problems"] == 1   # p2 surfaced as filtered, not untested
     assert row["untested"] == 0
     assert row["pass_at_k"] == 1.0         # 1/1, not dragged to 50% by the block
+    assert row["low_conf"] is True         # p1 sampled only once out of k=3
     assert row["fails"]["filtered"] == 3   # three filtered attempts tallied
     assert row["fails"]["no_code"] == 0    # not miscounted as no-code
 
@@ -127,6 +128,45 @@ def test_filtered_and_apierror_exclusions_are_distinct():
     assert row["scored"] == 1
     assert row["filtered_problems"] == 1   # pf
     assert row["untested"] == 1            # pe (api error) — kept separate
+
+
+def test_html_fully_filtered_model_cell_says_filtered_not_untested(tmp_path):
+    # A model excluded purely by filter blocks reads (filtered) in the
+    # leaderboard cell — (untested) would blame an API failure that didn't happen.
+    blocked = ProblemResult(
+        model="fable", problem_slug="p1", language=Language.python,
+        pass_at_1=0.0, pass_at_k=0.0,
+        attempts=[_filtered_att(), _filtered_att(), _filtered_att()],
+        exec_results=[_ex(False)] * 3, difficulty="easy",
+    )
+    run = _run([blocked])
+    row = _model_rows(run)[0]
+    assert row["scored"] == 0
+    assert row["filtered_problems"] == 1 and row["untested"] == 0
+    html = render_html(run, tmp_path / "r.html").read_text()
+    # Pin the cell markup specifically: the page footer mentions both words.
+    assert '<span class="ci">(filtered)</span>' in html
+    assert '<span class="ci">(untested)</span>' not in html
+
+
+def test_mixed_problem_exclusion_attributed_by_attempt_majority():
+    # api-error and filtered attempts mixed on ONE problem: the exclusion is
+    # attributed by the majority of its unsampled attempts, ties to filtered.
+    def mixed(slug, atts):
+        return ProblemResult(
+            model="m", problem_slug=slug, language=Language.python,
+            pass_at_1=0.0, pass_at_k=0.0, attempts=atts,
+            exec_results=[_ex(False)] * len(atts), difficulty="easy",
+        )
+
+    err_att = _att(error="HTTP 402")
+    maj_filt = mixed("pf", [_filtered_att(), _filtered_att(), err_att])
+    maj_err = mixed("pe", [_filtered_att(), err_att, err_att])
+    tie = mixed("pt", [_filtered_att(), err_att])
+    row = _model_rows(_run([maj_filt, maj_err, tie]))[0]
+    assert row["scored"] == 0
+    assert row["filtered_problems"] == 2  # pf (2-of-3 blocks) + pt (tie)
+    assert row["untested"] == 1           # pe — mostly api-errored
 
 
 def test_headline_on_aborted_run():
@@ -199,6 +239,18 @@ def test_html_renders_per_effort_section_headings(tmp_path):
     html = render_html(_run(results), tmp_path / "r.html").read_text()
     assert "Leaderboard — low effort" in html
     assert "Leaderboard — high effort" in html
+    # Per-section membership: slice each heading to the end of its table, so a
+    # template rendering the flat `rows` under every heading (duplicating each
+    # model) fails here. The later failure-mode table lists both models, which
+    # is why the slice stops at the section's own </table>.
+    def section_table(heading):
+        seg = html.split(heading, 1)[1]
+        return seg[: seg.index("</table>")]
+
+    low = section_table("Leaderboard — low effort")
+    high = section_table("Leaderboard — high effort")
+    assert "m (low)" in low and "m (high)" not in low
+    assert "m (high)" in high and "m (low)" not in high
 
 
 def test_expand_targets_dedups_labels():
@@ -210,3 +262,34 @@ def test_empty_efforts_override_is_no_override():
     specs = [ModelSpec(id="m", efforts=["high"])]
     # empty override must NOT wipe out targets; per-spec efforts still apply
     assert [t.label for t in expand_targets(specs, efforts_override=[])] == ["m (high)"]
+
+
+def test_sections_order_full_effort_ladder_and_skip_unused():
+    """xhigh/max get their own boards, ordered cheapest→deepest→default.
+
+    Before the enum widened, _EFFORT_SECTION_ORDER stopped at high, so an
+    xhigh/max target parsed to an effort with no section and vanished from the
+    ordered output. Also pins that unused levels are skipped rather than
+    rendering empty boards.
+    """
+    results = [
+        _pr("m (max)", "p1", "easy", [(True, None)]),
+        _pr("m (low)", "p1", "easy", [(True, None)]),
+        _pr("plain", "p1", "easy", [(True, None)]),
+        _pr("m (xhigh)", "p1", "easy", [(True, None)]),
+    ]
+    sections = _grouped_model_rows(_run(results))
+    # medium/high were never used -> no empty boards for them
+    assert [s["effort"] for s in sections] == ["low", "xhigh", "max", None]
+    assert [r["model"] for r in sections[1]["rows"]] == ["m (xhigh)"]
+    assert sections[-1]["title"] == "Leaderboard — default (no effort)"
+
+
+def test_html_renders_xhigh_and_max_section_headings(tmp_path):
+    results = [
+        _pr("m (xhigh)", "p1", "easy", [(True, None)]),
+        _pr("m (max)", "p1", "easy", [(True, None)]),
+    ]
+    html = render_html(_run(results), tmp_path / "r.html").read_text()
+    assert "Leaderboard — xhigh effort" in html
+    assert "Leaderboard — max effort" in html

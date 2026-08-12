@@ -11,7 +11,7 @@ import asyncio
 from dataclasses import dataclass, field
 
 from bench.openrouter import ModelPricing
-from bench.types import Problem, RunConfig, RunTarget
+from bench.types import VALID_EFFORTS, Problem, RunConfig, RunTarget
 
 # Heuristic: base completion length (tokens) for one attempt's *answer* — the
 # fenced solution — before any reasoning tokens. A full multi-language solution
@@ -22,8 +22,29 @@ DEFAULT_COMPLETION_TOKENS = 1200
 # Reasoning models emit these on top of the visible answer and OpenRouter bills
 # them as completion tokens, so a high-effort variant costs materially more than
 # a low-effort one. Rough, deliberately order-of-magnitude figures — tune freely.
-# An effort-less target (None) adds nothing.
-REASONING_TOKENS: dict[str, int] = {"low": 1000, "medium": 4000, "high": 10000}
+# An effort-less target (None) adds nothing. Roughly doubling per step past high,
+# continuing the low→medium→high progression; xhigh/max are the deepest levels
+# and must never estimate below high, or the spend guard under-prices the most
+# expensive targets in the roster.
+REASONING_TOKENS: dict[str, int] = {
+    "low": 1000,
+    "medium": 4000,
+    "high": 10000,
+    "xhigh": 20000,
+    "max": 40000,
+}
+
+# Every level in VALID_EFFORTS must be priced above. Enforced at import because
+# the previous lookup silently defaulted an unpriced level to ZERO reasoning
+# tokens — so adding a level to the enum made the deepest, most expensive
+# targets estimate *cheaper* than low effort, in the one direction a spend cap
+# must never be wrong. Fail loudly at startup instead.
+_unpriced = set(VALID_EFFORTS) - set(REASONING_TOKENS)
+if _unpriced:
+    raise RuntimeError(
+        f"REASONING_TOKENS is missing effort level(s) {sorted(_unpriced)}; "
+        "every level in bench.types.VALID_EFFORTS needs a token estimate here."
+    )
 
 # Fixed prompt overhead (tokens) added by the strict/loose instruction wrapper.
 PROMPT_WRAPPER_TOKENS = 80
@@ -81,7 +102,10 @@ def estimate_run(
         calls = len(problems) * config.k
         est_prompt = prompt_tokens_total * config.k
         # Higher reasoning effort adds billed thinking tokens on top of the answer.
-        per_call_completion = completion_tokens + REASONING_TOKENS.get(target.effort or "", 0)
+        # Indexed, not .get()-with-default: only an effort-less target adds zero,
+        # and the import-time guard above means a keyed lookup cannot miss.
+        reasoning = 0 if target.effort is None else REASONING_TOKENS[target.effort]
+        per_call_completion = completion_tokens + reasoning
         est_completion = len(problems) * config.k * per_call_completion
         price = pricing.get(target.model)
         if price is None:
@@ -94,10 +118,6 @@ def estimate_run(
                 ModelCostEstimate(target.label, calls, est_prompt, est_completion, cost, True)
             )
     return CostEstimate(per_model=per_model)
-
-
-class SpendCapExceeded(RuntimeError):
-    """Raised/flagged when the run's spend cap is hit."""
 
 
 class SpendGuard:
@@ -130,7 +150,7 @@ class SpendGuard:
         return self._cap
 
     def abort(self, reason: str) -> None:
-        """Halt the run for a non-spend reason (e.g. a fatal auth/billing error).
+        """Halt the run with ``reason`` (a fatal error or the spend cap).
 
         Idempotent — the first reason wins, so the message reflects the failure
         that actually stopped the run. ``can_proceed`` returns False thereafter.
@@ -147,7 +167,7 @@ class SpendGuard:
             if self.abort_reason is not None:
                 return False
             if self._spent >= self._cap:
-                self.stopped = True
+                self.abort(self._cap_message())
                 return False
             return True
 
@@ -155,7 +175,10 @@ class SpendGuard:
         async with self._lock:
             self._spent += cost_usd
             if self._spent >= self._cap:
-                self.stopped = True
+                self.abort(self._cap_message())
+
+    def _cap_message(self) -> str:
+        return f"Run halted — spend cap ${self._cap:.2f} reached (${self._spent:.2f} spent)."
 
 
 __all__ = [
@@ -163,7 +186,6 @@ __all__ = [
     "CostEstimate",
     "ModelCostEstimate",
     "SpendGuard",
-    "SpendCapExceeded",
     "DEFAULT_COMPLETION_TOKENS",
     "REASONING_TOKENS",
 ]
