@@ -14,6 +14,12 @@
 #       price_override: <float | null>   # optional; flat USD/token, both sides
 #       efforts: [low, medium, high]     # optional; reasoning-effort fan-out
 #
+# Valid `efforts` levels are low, medium, high, xhigh, max. NOT every model
+# accepts all five — OpenRouter publishes each model's real list as
+# `reasoning.supported_efforts` on /api/v1/models, and this file's per-entry
+# lists are set from it. Check there before adding a level to an entry; an
+# unsupported level passes local validation and then fails at the provider.
+#
 # `efforts` sweeps one model across reasoning levels: the entry expands into one
 # benchmark target per level, each a separate leaderboard row labelled
 # "<id> (<effort>)". Effort is sent via OpenRouter's unified reasoning.effort
@@ -28,22 +34,46 @@ models:
   # OpenRouter). Pricing shown is input / output USD per 1M tokens at time of
   # writing; the harness fetches live pricing at run time regardless.
 
+  # Each single-serving flagship is swept across reasoning levels so the
+  # leaderboard traces its cost/quality frontier (three rows: "<id> (low|medium|
+  # high)"). The GPT-5.6 tiers below are the exception — see the note there.
+
+  # Anthropic — Claude Opus 5  ($5 / $25 per M)
+  #
+  # Swept across the FULL five-level ladder, unlike the three-level entries
+  # below: xhigh is the level Anthropic documents as best for coding/agentic
+  # work, so capping this model at `high` would benchmark it below the setting
+  # it is designed to be used at. `max` is included to bound the top end.
+  # OpenRouter reports supported_efforts = [max, xhigh, high, medium, low].
+  - id: anthropic/claude-opus-5
+    price_override: null
+    efforts: [low, medium, high, xhigh, max]
+
   # Anthropic — Claude Opus 4.8  ($5 / $25 per M)
   - id: anthropic/claude-opus-4.8
     price_override: null
+    efforts: [low, medium, high]
 
   # Anthropic — Claude Fable 5
-  - id: anthropic/claude-fable-5
+  - id: anthropic/claude-fable-5   # $10 / $50 per M
     price_override: null
+    efforts: [low, medium, high]
 
   # OpenAI — GPT-5.5  ($5 / $30 per M)
   - id: openai/gpt-5.5
     price_override: null
+    efforts: [low, medium, high]
 
   # OpenAI — GPT-5.6 tiers (no bare "gpt-5.6" id exists on OpenRouter; the series
   # ships as Luna/Terra/Sol. The -pro of each is the same model on a different
   # serving tier, so the plain ids are used here for a within-5.6 cost/quality
   # frontier). Prices are input / output USD per 1M tokens.
+  #
+  # These deliberately carry NO `efforts` sweep: the luna→terra→sol tiers already
+  # ARE the 5.6 cost/quality frontier, so crossing them with low/medium/high
+  # would multiply into nine rows conflating two axes (serving tier × reasoning
+  # effort). Sweep effort on ONE 5.6 tier via `--efforts` if that frontier is
+  # ever wanted.
   - id: openai/gpt-5.6-luna   # $1 / $6 — fast, cost-efficient
     price_override: null
   - id: openai/gpt-5.6-terra  # $2.50 / $15 — balanced
@@ -54,7 +84,31 @@ models:
   # Google — Gemini 3.1 Pro  ($2 / $12 per M)
   - id: google/gemini-3.1-pro-preview
     price_override: null
+    efforts: [low, medium, high]
 
   # xAI — Grok 4.5  ($2 / $6 per M)
   - id: x-ai/grok-4.5
     price_override: null
+    efforts: [low, medium, high]
+
+  # Moonshot — Kimi K3  ($3 / $15 per M)
+  #
+  # NOTE the gapped ladder: OpenRouter reports supported_efforts =
+  # [max, high, low] for this model — it has no `medium` and no `xhigh`. The
+  # sweep below is those three levels exactly. Adding `medium` here would be
+  # accepted by VALID_EFFORTS and then rejected by the provider at run time.
+  - id: moonshotai/kimi-k3
+    price_override: null
+    efforts: [low, high, max]
+
+  # Alibaba — Qwen 3.8 Max  ($2 / $6 per M)
+  #
+  # The only 3.8-series id on OpenRouter at time of writing (no plus/flash tier
+  # yet), so there is no within-3.8 serving-tier frontier to trace — it gets a
+  # reasoning sweep like the other flagships. supported_efforts =
+  # [xhigh, high, medium, low, minimal]: no `max`, and `minimal` is deliberately
+  # not swept (see the VALID_EFFORTS note in bench/types.py). Reasoning is
+  # `mandatory: true` on this model, so an effort-less target is not meaningful.
+  - id: qwen/qwen3.8-max
+    price_override: null
+    efforts: [low, medium, high, xhigh]

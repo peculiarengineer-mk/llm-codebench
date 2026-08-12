@@ -25,3 +25,6 @@ venv/
 *.swp
 .idea/
 .vscode/
+
+# Delegated OpenCode run transcripts
+.delegate/

@@ -48,7 +48,7 @@ page is fully self-contained — inline CSS/JS/SVG, light/dark aware — so it c
 be pasted directly into a blog post.
 
 Raw `results.json` and `results.csv` (now including `difficulty`, `timeouts`,
-and `no_code` columns) are exported for any downstream analysis.
+`no_code`, and `filtered` columns) are exported for any downstream analysis.
 
 A `--dry-run` mode prices the whole run (model × problem × k API calls) and
 enforces a per-run spend cap **before any paid API call is made**.
@@ -92,21 +92,67 @@ Common flags: `--models`, `--efforts`, `--langs`, `--k`, `--temp`, `--timeout`,
 The same model can be benchmarked across reasoning-effort levels to trace its
 cost-vs-quality curve. Each level becomes its own leaderboard row, labelled
 `<model> (<effort>)`, and effort is sent via OpenRouter's unified
-`reasoning.effort` param (mapped per provider; non-reasoning models ignore it):
+`reasoning.effort` param (mapped per provider; non-reasoning models ignore it).
+The report then **splits the leaderboard into one section per level** — *low*,
+*medium*, *high*, *xhigh* and *max* boards (plus a *default* board for any
+effort-less model), so the levels read as comparable tables rather than one
+interleaved list. A level no target used is skipped, so a `low,high` run renders
+two boards, not five.
+
+**Not every model supports every level.** The five names above are the harness
+vocabulary; OpenRouter publishes each model's real list as
+`reasoning.supported_efforts` on `/api/v1/models`, and the per-entry `efforts:`
+lists in `config/models.yaml` are set from it. Kimi K3, for instance, has no
+`medium` and no `xhigh`; Qwen 3.8 has no `max`. A level the model doesn't
+support passes local validation and then fails at the provider — check
+OpenRouter before adding one to an entry.
+
+By default each model runs the levels its `config/models.yaml` entry lists —
+most reasoning-capable entries are swept across low/medium/high, and Claude
+Opus 5 across all five (`xhigh` is the level Anthropic documents as best for
+coding, so capping it at `high` would measure it below its intended setting).
+The GPT-5.6 tiers
+are the deliberate exception: luna/terra/sol are reasoning-capable but carry no
+sweep, since the serving tiers already are the 5.6 cost/quality frontier (see
+the note in `config/models.yaml`).
+
+`--efforts` is an override, not a subset selector: a non-empty value replaces
+the per-entry lists for *every* selected model. So `--efforts high` also
+converts the unswept luna/terra/sol entries into `(high)` targets — the very
+serving-tier × reasoning-effort conflation the yaml note avoids. Omit the flag
+to run each model's configured levels:
 
 ```bash
-# Sweep one model across all three levels
-llm-codebench --models anthropic/claude-opus-4.8 --efforts low,medium,high --dry-run
+llm-codebench --efforts high            # every selected model at high effort
+llm-codebench --efforts low,high        # every selected model at low and high
+llm-codebench                           # each model's configured levels (default)
 ```
 
-Or pin levels per model in `config/models.yaml` with an `efforts:` fan-out:
+Pin levels per model in `config/models.yaml` with an `efforts:` fan-out:
 
 ```yaml
 - id: anthropic/claude-opus-4.8
   efforts: [low, medium, high]   # → three targets, three leaderboard rows
 ```
 
-A run-wide `--efforts` overrides the per-entry lists for every selected model.
+**Mind the estimate when sweeping — the default roster no longer fits under the
+default cap.** `--dry-run` prices the full sweep at **30 targets / 1710 calls /
+≈$310** at the prices documented in `config/models.yaml`, against a
+`--max-spend` default of $150: a full swept run is halted partway by the spend
+guard. That is the cap doing its job, not a bug — narrow the run with
+`--models`/`--efforts`/`--filter`, or raise `--max-spend` deliberately.
+
+Deep levels dominate that total. One model across its ladder, from the same
+dry run:
+
+| `anthropic/claude-opus-5` | low | medium | high | xhigh | max |
+|---|---|---|---|---|---|
+| est. cost | $3.20 | $7.48 | $16.03 | $30.28 | $58.78 |
+
+So `max` costs ~18× `low` on the same 19 problems. Every figure here comes from
+the `REASONING_TOKENS` heuristic in `bench/cost.py` — a rough estimate, not a
+measurement — but the ordering is the point: sweeping the top of the ladder is
+where the money goes.
 
 ## Configuration
 

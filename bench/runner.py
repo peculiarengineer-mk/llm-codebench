@@ -120,10 +120,18 @@ async def _run_one_attempt(
     attempt = attempt.model_copy(update={"code": code})
 
     if code is None:
+        # Distinguish a provider safety-filter block (empty 200) from the model
+        # genuinely replying without a usable code block, so the drill-down and
+        # failure-mode tally reflect what actually happened.
+        if attempt.finish_reason == "content_filter":
+            stderr = ("provider blocked the response (finish_reason=content_filter); "
+                      "no code was generated")
+        else:
+            stderr = "no extractable code block in model response"
         exec_result = ExecResult(
             passed=False,
             stdout="",
-            stderr="no extractable code block in model response",
+            stderr=stderr,
             exit_code=-1,
             duration_ms=0.0,
             timed_out=False,
@@ -168,10 +176,11 @@ async def _run_problem_for_model(
         attempts.append(attempt)
         exec_results.append(exec_result)
 
-    # Score only attempts that actually reached the model. An attempt that failed
-    # at the API layer (e.g. HTTP 402) never sampled it, so counting it toward
-    # pass@k would penalize the model for a billing/infra failure.
-    scored = [(a, e) for a, e in zip(attempts, exec_results) if a.error is None]
+    # Score only genuine model samples. An attempt that failed at the API layer
+    # (e.g. HTTP 402) never reached the model, and a content-filter block means
+    # the provider refused before the model answered — counting either toward
+    # pass@k would penalize the model for something it never got to attempt.
+    scored = [(a, e) for a, e in zip(attempts, exec_results) if a.sampled]
     n = len(scored)
     c = sum(1 for _, e in scored if e.passed)
     return ProblemResult(

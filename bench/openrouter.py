@@ -217,6 +217,7 @@ class OpenRouterClient:
         raw_lines: list[str] = []
         usage: dict = {}
         reported_cost: float | None = None
+        finish_reason: str | None = None
 
         async with self._client.stream(
             "POST", _COMPLETIONS_PATH, json=payload
@@ -253,6 +254,13 @@ class OpenRouterClient:
                         if ttft_ms is None:
                             ttft_ms = (time.perf_counter() - start) * 1000.0
                         content_parts.append(piece)
+                    # Last non-null finish_reason wins (it arrives on the final
+                    # content chunk, before the usage-only chunk). "content_filter"
+                    # here means the provider blocked the reply — an empty 200, not
+                    # a model that chose to emit no code.
+                    reason = choices[0].get("finish_reason")
+                    if reason:
+                        finish_reason = reason
                 if chunk.get("usage"):
                     usage = chunk["usage"]
                     if usage.get("cost") is not None:
@@ -281,6 +289,7 @@ class OpenRouterClient:
             cost_usd=cost_usd,
             price_source=pricing.source,  # type: ignore[arg-type]
             raw_response="".join(content_parts),
+            finish_reason=finish_reason,
         )
 
     async def _request_json(self, method: str, path: str) -> dict:

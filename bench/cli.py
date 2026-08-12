@@ -15,7 +15,7 @@ from bench import config as cfg
 from bench.openrouter import OpenRouterClient
 from bench.problems import ProblemFormatError, load_problems
 from bench.report import export_raw, render_cli, render_html
-from bench.runner import dry_run_estimate, run_benchmark
+from bench.runner import dry_run_estimate, resolve_targets, run_benchmark
 from bench.sandbox import SandboxError, ensure_images
 from bench.types import Language
 
@@ -28,9 +28,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--models", help="comma-separated OpenRouter model ids "
                    "(default: every id in config/models.yaml)")
-    p.add_argument("--efforts", help="comma-separated reasoning-effort levels "
-                   "(low,medium,high) to sweep every selected model across; "
-                   "overrides per-entry 'efforts' in config/models.yaml")
+    p.add_argument("--efforts", help="reasoning-effort level(s) to run, "
+                   "comma-separated (e.g. 'high' or 'low,high'); each becomes its "
+                   "own leaderboard section. Omit to run whatever levels each model "
+                   "configures in config/models.yaml. When given, overrides those "
+                   "per-entry lists for every selected model.")
     p.add_argument("--langs", help="comma-separated languages to run "
                    "(python,csharp,typescript,bash); default: all")
     p.add_argument("--k", type=int, help=f"attempts per problem (default {cfg.DEFAULT_K})")
@@ -165,22 +167,35 @@ async def _amain(args: argparse.Namespace) -> int:
         referer=referer,
         title=title,
     ) as client:
+        # -- cost estimate (best-effort; never aborts a real run) -----------
+        pricing = {}
+        if api_key:
+            try:
+                pricing = await client.get_pricing()
+            except Exception as exc:  # noqa: BLE001 — best-effort pricing
+                console.print(f"[yellow]Could not fetch live pricing: {exc}[/yellow]")
+        for model, price in price_overrides.items():
+            from bench.openrouter import ModelPricing
+            pricing[model] = ModelPricing(price, price, "config")
+        estimate = dry_run_estimate(run_config, problems, pricing)
+
         # -- dry run --------------------------------------------------------
         if run_config.dry_run:
-            pricing = {}
-            if api_key:
-                try:
-                    pricing = await client.get_pricing()
-                except Exception as exc:  # noqa: BLE001 — best-effort pricing
-                    console.print(f"[yellow]Could not fetch live pricing: {exc}[/yellow]")
-            for model, price in price_overrides.items():
-                from bench.openrouter import ModelPricing
-                pricing[model] = ModelPricing(price, price, "config")
-            estimate = dry_run_estimate(run_config, problems, pricing)
             _print_estimate(estimate, run_config, console)
             return 0
 
-        # -- real run: sandbox images then benchmark ------------------------
+        # -- real run: one-line estimate, then sandbox images ---------------
+        targets = resolve_targets(run_config)
+        console.print(
+            f"Estimate: [bold]{len(targets)}[/bold] targets, "
+            f"[bold]{estimate.total_calls}[/bold] calls, "
+            f"~[bold]${estimate.total_cost_usd:.4f}[/bold] "
+            f"(cap ${run_config.max_spend_usd:.2f})"
+        )
+        if estimate.total_cost_usd > run_config.max_spend_usd:
+            console.print("[red]Estimated cost exceeds --max-spend; the run would be "
+                          "halted by the spend guard before completing.[/red]")
+
         needed = sorted({p.language for p in problems}, key=lambda x: x.value)
         try:
             console.print("Ensuring sandbox images (first run builds them)…")

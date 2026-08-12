@@ -33,7 +33,16 @@ DEFAULT_MODELS_YAML = PROJECT_ROOT / "config" / "models.yaml"
 DEFAULT_K = 3
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_TIMEOUT = 10.0
-DEFAULT_MAX_SPEND_USD = 5.0
+# NOTE: this no longer clears a full default-roster run. Since Claude Opus 5
+# (swept low→max), Kimi K3 and Qwen 3.8 joined the roster, `--dry-run` prices the
+# full sweep at ≈$310 across 30 targets / 1710 calls, against the prices
+# documented in config/models.yaml — so a full swept run WILL be halted partway
+# by the SpendGuard. That is the intended behaviour of a cap, not a bug: narrow
+# the run with --models/--efforts/--filter, or raise --max-spend deliberately.
+# The ≈$310 figure is the REASONING_TOKENS heuristic in bench/cost.py, not a
+# measurement, and the deep xhigh/max levels dominate it (Opus 5 alone runs
+# $3.20 at low and $58.78 at max).
+DEFAULT_MAX_SPEND_USD = 150.0
 DEFAULT_PROMPT_STYLE = "strict"
 
 _API_KEY_ENV = "OPENROUTER_API_KEY"
